@@ -62,6 +62,10 @@ ADD https://astral.sh/uv/install.sh /uv-installer.sh
 RUN sh /uv-installer.sh && rm /uv-installer.sh
 ENV PATH="/root/.local/bin/:$PATH"
 
+#install ffmpeg
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg libavcodec-dev libavutil-dev libavformat-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 # Setup X11
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	libx11-dev \
