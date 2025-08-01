@@ -57,12 +57,10 @@ RUN (type -p wget >/dev/null || (apt update && apt-get install wget -y)) \
 # Setup `python`
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
-# Install poetry
-RUN curl -sSL https://install.python-poetry.org | python -
-ENV PATH="/root/.local/bin:$PATH"
-RUN echo 'if [ "$HOME" != "/root" ]; then ln -sf /root/.local/bin/poetry $HOME/.local/bin/poetry; fi' >> /root/.bashrc
-RUN poetry config virtualenvs.create false
-RUN poetry config virtualenvs.in-project true
+# Install uv
+ADD https://astral.sh/uv/install.sh /uv-installer.sh
+RUN sh /uv-installer.sh && rm /uv-installer.sh
+ENV PATH="/root/.local/bin/:$PATH"
 
 # Setup X11
 RUN apt-get update && apt-get install -y --no-install-recommends \

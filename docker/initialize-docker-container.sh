@@ -1,7 +1,7 @@
 #!/bin/bash
-# install octo
 source ~/.bashrc
-cd ~/lerobot && poetry install --extras "aloha xarm pusht smolvla"
+cd ~/lerobot && uv venv -p 3.10
+cd ~/lerobot && uv pip install --no-cache ".[all]"
 
 # git safe directory
 cd ~/lerobot && git config --global --add safe.directory /root/lerobot
