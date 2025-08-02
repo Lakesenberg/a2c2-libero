@@ -71,7 +71,7 @@ class Args:
     """Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90"""
     num_steps_wait: int = 10
     """Number of steps to wait for objects to stabilize in sim."""
-    num_trials_per_task: int = 50
+    num_trials_per_task: int = 1
     """Number of rollouts per task."""
 
     # --- Evaluation arguments ---
@@ -166,6 +166,7 @@ def eval_libero(args: Args) -> None:
             # frames.append(agentview_image)
             # import ipdb; ipdb.set_trace()
             logging.info(f"Starting episode {task_episodes+1}...")
+            
             while t < max_steps:
                 try:
                     # Get preprocessed image
@@ -199,16 +200,15 @@ def eval_libero(args: Args) -> None:
                     with torch.inference_mode():
                         action_tensor = policy.select_action(observation)
                     action = action_tensor.cpu().numpy()[0]
-                    # action[-1] = 1 - action[-1]
-                    action = normalize_gripper_action(action, binarize=False)
-                    action = invert_gripper_action(action)
-
+                    print(policy.model.language_embeddings.shape)
+                    # action = normalize_gripper_action(action, binarize=False)
+                    # action = invert_gripper_action(action)
                     # Execute action in environment
                     obs, _, done, _ = env.step(action)
                     if done:
                         task_successes += 1
                         total_successes += 1
-                        break
+                        break 
                     t += 1
 
                 except Exception as e:

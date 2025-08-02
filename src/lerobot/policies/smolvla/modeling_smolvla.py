@@ -668,6 +668,9 @@ class VLAFlowMatching(nn.Module):
         self.add_image_special_tokens = self.config.add_image_special_tokens
         self.image_end_token = torch.tensor([self.fake_image_token], dtype=torch.long)
         self.prefix_length = self.config.prefix_length
+        
+        # keep language embeddings for the residual policy
+        self.language_embeddings = None
 
     def set_requires_grad(self):
         for params in self.state_proj.parameters():
@@ -749,6 +752,8 @@ class VLAFlowMatching(nn.Module):
         # Normalize language embeddings
         lang_emb_dim = lang_emb.shape[-1]
         lang_emb = lang_emb * math.sqrt(lang_emb_dim)
+        
+        self.language_embeddings = lang_emb  # Store for residual policy
 
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
