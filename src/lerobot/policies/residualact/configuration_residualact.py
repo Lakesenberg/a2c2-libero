@@ -20,7 +20,7 @@ from lerobot.configs.types import NormalizationMode
 from lerobot.optim.optimizers import AdamWConfig
 
 
-@PreTrainedConfig.register_subclass("act")
+@PreTrainedConfig.register_subclass("residualact")
 @dataclass
 class ResidualACTConfig(PreTrainedConfig):
     """Configuration class for the Action Chunking Transformers policy.
@@ -179,7 +179,8 @@ class ResidualACTConfig(PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
-        return list(range(self.chunk_size))
+        # need one more index for the action at time t+1 to calculate the interpolated action
+        return list(range(self.chunk_size+1))
 
     @property
     def reward_delta_indices(self) -> None:
