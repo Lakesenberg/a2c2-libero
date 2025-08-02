@@ -231,7 +231,6 @@ def train(cfg: TrainPipelineConfig):
             torch.cos(2 *  np.pi * time_index / base_policy.config.chunk_size),
             torch.sin(2 *  np.pi * time_index / base_policy.config.chunk_size)
         ], dim=1).to(device)
-        print("Time feature shape:", time_feature.shape)
         
         batch_size = batch["observation.images.image"].shape[0]
         residual_chunk_size = policy.config.chunk_size
@@ -273,7 +272,6 @@ def train(cfg: TrainPipelineConfig):
             "time_feature": time_feature,
             "language_embedding": base_policy.model.language_embeddings.to(device),
         }
-        print(base_policy.model.language_embeddings[0][10])
         return converted_batch
 
     logging.info("Start offline training on a fixed dataset")

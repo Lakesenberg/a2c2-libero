@@ -138,6 +138,7 @@ class ResidualACTPolicy(PreTrainedPolicy):
         self.eval()
 
         batch = self.normalize_inputs(batch)
+        batch = self.normalize_targets(batch)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
@@ -156,7 +157,7 @@ class ResidualACTPolicy(PreTrainedPolicy):
         batch = self.normalize_targets(batch)
         actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
 
-        # target action 
+        # target action (first action is predicted action)
         target_action = batch[ACTION][:,1:]
         l1_loss = (
             F.l1_loss(target_action, actions_hat, reduction="none") * ~batch["action_is_pad"].unsqueeze(-1)
