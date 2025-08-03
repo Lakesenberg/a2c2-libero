@@ -2,6 +2,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 import time
 import torch
+import numpy as np
 
 # BASE_REPO_NAME = "k1000dai/libero"
 BASE_REPO_NAME = "k1000dai/libero_pick_up_the_black_bowl"
@@ -70,7 +71,7 @@ for i in range(len(base_dataset)):
             "observation.state": base_dataset[i]["observation.state"],
             "action": base_dataset[i]["action"],
             "predicted_action": predicted_action[time_index].cpu(),
-            "elapsed_time": time_index,
+            "elapsed_time": np.array(time_index, dtype=np.int64),
         },
         task=base_dataset[i]["task"],
     )
