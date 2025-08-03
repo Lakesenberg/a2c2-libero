@@ -147,6 +147,7 @@ def train(cfg: TrainPipelineConfig):
     base_policy = SmolVLAPolicy.from_pretrained(BASE_MODEL_PATH)
     base_policy.to(device)
     base_policy.eval()
+    base_policy = torch.compile(base_policy, mode="reduce-overhead", fullgraph=True)
     
     logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
