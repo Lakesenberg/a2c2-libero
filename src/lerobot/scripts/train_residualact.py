@@ -143,7 +143,7 @@ def train(cfg: TrainPipelineConfig):
         cfg=cfg.policy,
         ds_meta=dataset.meta,
     )
-    BASE_MODEL_PATH = "k1000dai/smolvla_libero_scratch_40k"
+    BASE_MODEL_PATH = "k1000dai/smolvla_libero_scratch"
     base_policy = SmolVLAPolicy.from_pretrained(BASE_MODEL_PATH)
     base_policy.to(device)
     base_policy.eval()
@@ -207,12 +207,47 @@ def train(cfg: TrainPipelineConfig):
     )
     
     def convert_raw_batch_to_residualact(batch):
-        predicted_action_chunk = base_policy.predict_action_chunk(batch)
+        """
+        Convert the raw batch to the format expected by the residualact policy.
+        This includes:
+        - Using the first frame of the state horizon for smolVLA.
+        - Interpolating the action between time t and t+1.
+        - Adding time features.
+        
+        Input Batch should contain:
+        - observation.images.image: (B, T, C, H, W)
+        - observation.images.wrist_image: (B, T, C, H, W)
+        - observation.state: (B, T, S)
+        - action: (B, T+1, A) , +1 for interplate last action
+        - action_is_pad: (B, T + 1) boolean tensor indicating padded actions
+        - task: (B,) task identifiers
+        - language_embedding: (B, D) language embeddings
+        
+        Output Batch will contain:
+        - observation.images.image: (B, C, H, W) - selected frame
+        - observation.images.wrist_image: (B, C, H, W) - selected frame
+        - observation.state: (B, S) - selected frame
+        - action: (B, chunk_size + 1, A) - ( predicted action at time t, interpolated actions from t to t+1 )
+        - action_is_pad: (B, chunk_size) - all False (non-padded)
+        - task: (B,) - task identifiers
+        - time_feature: (B, 2) - time features for the selected frame
+        - language_embedding: (B, D) - language embeddings
+        """
+        batch_size = batch["observation.images.image"].shape[0]
+        
+        # use first frame of state horizon for smolVLA
+        smol_vla_batch = {
+            "observation.images.image": torch.stack([batch["observation.images.image"][i, 0] for i in range(batch_size)]).to(device),
+            "observation.images.wrist_image": torch.stack([batch["observation.images.wrist_image"][i, 0] for i in range(batch_size)]).to(device),
+            "observation.state": torch.stack([batch["observation.state"][i, 0] for i in range(batch_size)]).to(device),
+            "task": batch["task"],
+        }
+        predicted_action_chunk = base_policy.predict_action_chunk(smol_vla_batch)
         
         #get random time index from non-padded actions to ensure time_index+1 is also valid
         # Find the last non-padded index for each batch sample
         last_valid_indices = []
-        for i in range(batch["observation.images.image"].shape[0]):
+        for i in range(batch_size):
             # Find the last False (non-padded) position
             non_pad_mask = ~batch["action_is_pad"][i]  # True for non-padded
             if non_pad_mask.sum() > 1:  # Need at least 2 non-padded actions for interpolation
@@ -222,8 +257,8 @@ def train(cfg: TrainPipelineConfig):
                 last_valid_indices.append(0)  # Fallback to 0 if not enough data
         
         time_index = torch.stack([
-            torch.randint(0, max(1, last_valid_indices[i] + 1), (1,), device=device)[0] 
-            for i in range(batch["observation.images.image"].shape[0])
+            torch.randint(0, max(1, last_valid_indices[i] + 1), (1,), device=device)[0]
+            for i in range(batch_size)
         ])
         
         
@@ -232,7 +267,6 @@ def train(cfg: TrainPipelineConfig):
             torch.sin(2 *  np.pi * time_index / base_policy.config.chunk_size)
         ], dim=1).to(device)
         
-        batch_size = batch["observation.images.image"].shape[0]
         residual_chunk_size = policy.config.chunk_size
         action_t = torch.stack([batch["action"][i, time_index[i]] for i in range(batch_size)]).to(device)
         action_t_plus_1 = torch.stack([batch["action"][i, time_index[i] + 1] for i in range(batch_size)]).to(device)
@@ -261,7 +295,8 @@ def train(cfg: TrainPipelineConfig):
             ],
             dim=1,
         ).to(device)
-
+        
+        
         converted_batch = {
             "observation.images.image": torch.stack([batch["observation.images.image"][i, time_index[i]] for i in range(batch_size)]).to(device),
             "observation.images.wrist_image": torch.stack([batch["observation.images.wrist_image"][i, time_index[i]] for i in range(batch_size)]).to(device),
