@@ -38,7 +38,9 @@ from lerobot.policies.utils import get_device_from_parameters
 from lerobot.scripts.eval import eval_policy
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
-from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.policies.smolvla.smolvlm_with_expert import SmolVLMWithExpertModel
+from transformers import AutoProcessor
+import math
 
 from lerobot.utils.train_utils import (
     get_step_checkpoint_dir,
@@ -143,11 +145,9 @@ def train(cfg: TrainPipelineConfig):
         cfg=cfg.policy,
         ds_meta=dataset.meta,
     )
-    BASE_MODEL_PATH = "k1000dai/smolvla_libero_scratch"
-    base_policy = SmolVLAPolicy.from_pretrained(BASE_MODEL_PATH)
-    base_policy.to(device)
-    base_policy.eval()
-    base_policy = torch.compile(base_policy, mode="reduce-overhead", fullgraph=True)
+    
+    vlm = SmolVLMWithExpertModel(model_id="HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
+    language_tokenizer = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM2-500M-Video-Instruct").tokenizer
     
     logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
@@ -208,89 +208,24 @@ def train(cfg: TrainPipelineConfig):
     )
     
     def convert_raw_batch_to_residualact(batch):
-        """
-        Convert the raw batch to the format expected by the residualact policy.
-        This includes:
-        - Using the first frame of the state horizon for smolVLA.
-        - Interpolating the action between time t and t+1.
-        - Adding time features.
-        
-        Input Batch should contain:
-        - observation.images.image: (B, T, C, H, W)
-        - observation.images.wrist_image: (B, T, C, H, W)
-        - observation.state: (B, T, S)
-        - action: (B, T+1, A) , +1 for interplate last action
-        - action_is_pad: (B, T + 1) boolean tensor indicating padded actions
-        - task: (B,) task identifiers
-        - language_embedding: (B, D) language embeddings
-        
-        Output Batch will contain:
-        - observation.images.image: (B, C, H, W) - selected frame
-        - observation.images.wrist_image: (B, C, H, W) - selected frame
-        - observation.state: (B, S) - selected frame
-        - action: (B, chunk_size + 1, A) - ( predicted action at time t, interpolated actions from t to t+1 )
-        - action_is_pad: (B, chunk_size) - all False (non-padded)
-        - task: (B,) - task identifiers
-        - time_feature: (B, 2) - time features for the selected frame
-        - language_embedding: (B, D) - language embeddings
-        """
         batch_size = batch["observation.images.image"].shape[0]
-        time_start = time.perf_counter()
-        # use first frame of state horizon for smolVLA
-        smol_vla_batch = {
-            "observation.images.image": torch.stack([batch["observation.images.image"][i, 0] for i in range(batch_size)]).to(device),
-            "observation.images.wrist_image": torch.stack([batch["observation.images.wrist_image"][i, 0] for i in range(batch_size)]).to(device),
-            "observation.state": torch.stack([batch["observation.state"][i, 0] for i in range(batch_size)]).to(device),
-            "task": batch["task"],
-        }
-        print(f"Convert raw batch to residualact took {time.perf_counter() - time_start:.3f} seconds")
-        with torch.inference_mode():
-            predicted_action_chunk = base_policy.predict_action_chunk(smol_vla_batch)
         
-        print(f"Predict action chunk took {time.perf_counter() - time_start:.3f} seconds")
-        
-        #get random time index from non-padded actions to ensure time_index+1 is also valid
-        # Find the last non-padded index for each batch sample
-        last_valid_indices = []
-        for i in range(batch_size):
-            # Find the last False (non-padded) position
-            non_pad_mask = ~batch["action_is_pad"][i]  # True for non-padded
-            if non_pad_mask.sum() > 1:  # Need at least 2 non-padded actions for interpolation
-                last_valid_idx = non_pad_mask.nonzero(as_tuple=True)[0][-1].item()
-                last_valid_indices.append(max(0, last_valid_idx - 1))  # -1 to ensure time_index+1 is valid
-            else:
-                last_valid_indices.append(0)  # Fallback to 0 if not enough data
-        
-        time_index = torch.stack([
-            torch.randint(0, max(1, last_valid_indices[i] + 1), (1,), device=device)[0]
-            for i in range(batch_size)
-        ])
-        
-        
-        time_feature = torch.stack([
-            torch.cos(2 *  np.pi * time_index / base_policy.config.chunk_size),
-            torch.sin(2 *  np.pi * time_index / base_policy.config.chunk_size)
-        ], dim=1).to(device)
         
         residual_chunk_size = policy.config.chunk_size
-        action_t = torch.stack([batch["action"][i, time_index[i]] for i in range(batch_size)]).to(device)
-        action_t_plus_1 = torch.stack([batch["action"][i, time_index[i] + 1] for i in range(batch_size)]).to(device)
-
         #action_t から action_t_plus_1までを chunk_size 個のアクションに線形補間
+        action_t = batch["action"][:, 0]
+        action_t_plus_1 = batch["action"][:, 1]
         ratio = torch.linspace(0, 1, residual_chunk_size, device=device).unsqueeze(0).repeat(batch_size, 1)
-        
         # action_tとaction_t_plus_1を(batch_size, 1, action_dim)に拡張
         action_t_expanded = action_t.unsqueeze(1)  # (batch_size, 1, action_dim)
         action_t_plus_1_expanded = action_t_plus_1.unsqueeze(1)  # (batch_size, 1, action_dim)
-        
         # ratioを(batch_size, residual_chunk_size, 1)に拡張
         ratio_expanded = ratio.unsqueeze(-1)  # (batch_size, residual_chunk_size, 1)
-        
         # 線形補間: action_t * (1-ratio) + action_t_plus_1 * ratio
         action_interpolated = action_t_expanded * (1 - ratio_expanded) + action_t_plus_1_expanded * ratio_expanded
         
         # predicted_action_chunk から time_index のアクションを取得
-        predicted_action_time_t = torch.stack([predicted_action_chunk[i, time_index[i]].to(device) for i in range(batch_size)]) # (Batch, action_dim)
+        predicted_action_time_t = batch["predicted_action"] # (batch_size,action_dim)
         predicted_action_time_t = predicted_action_time_t.unsqueeze(1)  # (batch_size, 1, action_dim)
         
         predicted_action_plus_target_action = torch.cat(
@@ -300,20 +235,46 @@ def train(cfg: TrainPipelineConfig):
             ],
             dim=1,
         ).to(device)
-        print(f"Action interpolation took {time.perf_counter() - time_start:.3f} seconds")
         
+        
+        # add time feature
+        time_index = batch["elapsed_time"].squeeze(1).to(device)  # (B,)
+        time_ratio = time_index / residual_chunk_size  # (B,) - normalized time index
+        time_feature = torch.stack([
+            torch.cos(2 *  np.pi * time_index / residual_chunk_size),
+            torch.sin(2 *  np.pi * time_index / residual_chunk_size),
+            time_ratio,  # Add normalized time index as additional feature
+        ], dim=1).to(device)
+        
+        # create language embedding 
+        tasks = batch["task"]
+        if isinstance(tasks, str):
+            tasks = [tasks]
+        tasks = [task if task.endswith("\n") else f"{task}\n" for task in tasks]
+        tokenized_prompt = language_tokenizer.__call__(
+            tasks,
+            padding="longest",
+            padding_side="right",
+            max_length=48,
+            return_tensors="pt",
+        )
+        lang_tokens = tokenized_prompt["input_ids"].to(device=device)
+        #lang_masks = tokenized_prompt["attention_mask"].to(device=device, dtype=torch.bool)
+        lang_emb = vlm.embed_language_tokens(lang_tokens)
+        # Normalize language embeddings
+        lang_emb_dim = lang_emb.shape[-1]
+        lang_emb = lang_emb * math.sqrt(lang_emb_dim)
         
         converted_batch = {
-            "observation.images.image": torch.stack([batch["observation.images.image"][i, time_index[i]] for i in range(batch_size)]).to(device),
-            "observation.images.wrist_image": torch.stack([batch["observation.images.wrist_image"][i, time_index[i]] for i in range(batch_size)]).to(device),
-            "observation.state": torch.stack([batch["observation.state"][i, time_index[i]] for i in range(batch_size)]).to(device),
+            "observation.images.image": batch["observation.images.image"],
+            "observation.images.wrist_image": batch["observation.images.wrist_image"],
+            "observation.state": batch["observation.state"],
             "action": predicted_action_plus_target_action,
             "action_is_pad": torch.zeros((batch_size, residual_chunk_size), dtype=torch.bool, device=device),  # All False (non-padded)
             "task": batch["task"],
             "time_feature": time_feature,
-            "language_embedding": base_policy.model.language_embeddings.to(device),
+            "language_embedding": lang_emb.to(device),  # (B, lang_emb_dim)
         }
-        print(f"Batch conversion took {time.perf_counter() - time_start:.3f} seconds")
         return converted_batch
 
     logging.info("Start offline training on a fixed dataset")

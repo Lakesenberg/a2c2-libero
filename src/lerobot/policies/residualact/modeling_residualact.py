@@ -363,7 +363,7 @@ class ResidualACT(nn.Module):
             self.encoder_env_state_input_proj = nn.Linear(
                 self.config.env_state_feature.shape[0], config.dim_model
             )
-        self.encoder_time_feature_input_proj = nn.Linear(2, config.dim_model)
+        self.encoder_time_feature_input_proj = nn.Linear(3, config.dim_model)
         self.encoder_predicted_action_input_proj = nn.Linear(
             self.config.action_feature.shape[0], config.dim_model
         )
@@ -519,7 +519,7 @@ class ResidualACT(nn.Module):
         
         # Language embedding tokens
         if "language_embedding" in batch:
-            language_emb = batch["language_embedding"]  # (B, token_length, 920)
+            language_emb = batch["language_embedding"]  # (B, token_length, 960)
             # Ensure the language embeddings are in the expected type (float) since they are usually in bfloat16.
             language_emb = language_emb.to(dtype=torch.float32)
             batch_size, token_length, _ = language_emb.shape
