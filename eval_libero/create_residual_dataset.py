@@ -45,8 +45,8 @@ new_dataset = LeRobotDataset.create(
     robot_type="panda",
     fps=base_dataset.fps,   
     features=new_features,
-    image_writer_threads=10,
-    image_writer_processes=5,
+    image_writer_threads=20,
+    image_writer_processes=10,
 )
 
 predicted_action = []
@@ -76,7 +76,7 @@ for i in range(len(base_dataset)):
         )
         predicted_action = predicted_action.squeeze(0)  # Remove batch dimension
         predicted_action = predicted_action.cpu()  # Move to CPU
-        language_embedding = base_policy.model.language_embeddings.unsqueeze(0).cpu()  # Move to CPU
+        language_embedding = base_policy.model.language_embeddings.to(dtype=torch.float32).unsqueeze(0).cpu()  # Move to CPU
         time_index = 0
     
     new_dataset.add_frame(
