@@ -52,9 +52,9 @@ for i in range(len(base_dataset)):
     if time_index == 49 or len(predicted_action) == 0:
         predicted_action = base_policy.predict_action_chunk(
             {
-                "observation.images.image": base_dataset[i]["observation.images.image"][0].unsqueeze(0).to("cuda"),
-                "observation.images.wrist_image": base_dataset[i]["observation.state"][0].unsqueeze(0).to("cuda"),
-                "observation.state": base_dataset[i]["observation.state"][0].unsqueeze(0).to("cuda"),
+                "observation.images.image": base_dataset[i]["observation.images.image"].unsqueeze(0).to("cuda"),
+                "observation.images.wrist_image": base_dataset[i]["observation.state"].unsqueeze(0).to("cuda"),
+                "observation.state": base_dataset[i]["observation.state"].unsqueeze(0).to("cuda"),
                 "task": base_dataset[i]["task"]
             }
         )
