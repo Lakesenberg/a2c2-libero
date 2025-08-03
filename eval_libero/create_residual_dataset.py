@@ -49,7 +49,7 @@ for i in range(len(base_dataset)):
         
     
     # show the first 10 images
-    if time_index == 49:
+    if time_index == 49 or len(predicted_action) == 0:
         predicted_action = base_policy.predict_action_chunk(
             {
                 "observation.images.image": base_dataset[i]["observation.images.image"][0].unsqueeze(0).to("cuda"),
