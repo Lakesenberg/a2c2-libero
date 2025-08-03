@@ -59,12 +59,14 @@ for i in range(len(base_dataset)):
                 "task": base_dataset[i]["task"]
             }
         )
+        predicted_action = predicted_action.squeeze(0)  # Remove batch dimension
         time_index = 0
+    print(predicted_action.shape)
     
     new_dataset.add_frame(
         {
-            "observation.images.image": base_dataset[i]["observation.images.image"],
-            "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"],
+            "observation.images.image": base_dataset[i]["observation.images.image"].permute(2, 0, 1),
+            "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"].permute(2, 0, 1),
             "observation.state": base_dataset[i]["observation.state"],
             "action": base_dataset[i]["action"],
             "predicted_action": predicted_action[time_index].cpu(),
