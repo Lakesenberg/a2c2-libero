@@ -53,7 +53,7 @@ for i in range(len(base_dataset)):
         predicted_action = base_policy.predict_action_chunk(
             {
                 "observation.images.image": base_dataset[i]["observation.images.image"].unsqueeze(0).to("cuda"),
-                "observation.images.wrist_image": base_dataset[i]["observation.state"].unsqueeze(0).to("cuda"),
+                "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"].unsqueeze(0).to("cuda"),
                 "observation.state": base_dataset[i]["observation.state"].unsqueeze(0).to("cuda"),
                 "task": base_dataset[i]["task"]
             }
@@ -63,7 +63,7 @@ for i in range(len(base_dataset)):
     new_dataset.add_frame(
         {
             "observation.images.image": base_dataset[i]["observation.images.image"][0],
-            "observation.images.wrist_image": base_dataset[i]["observation.state"][0],
+            "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"][0],
             "observation.state": base_dataset[i]["observation.state"][0],
             "action": base_dataset[i]["action"][0],
             "predicted_action": predicted_action[time_index].cpu(),
