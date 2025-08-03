@@ -210,7 +210,6 @@ def train(cfg: TrainPipelineConfig):
     def convert_raw_batch_to_residualact(batch):
         batch_size = batch["observation.images.image"].shape[0]
         
-        
         residual_chunk_size = policy.config.chunk_size
         #action_t から action_t_plus_1までを chunk_size 個のアクションに線形補間
         action_t = batch["action"][:, 0]
@@ -236,11 +235,8 @@ def train(cfg: TrainPipelineConfig):
             dim=1,
         ).to(device)
         
-        
         # add time feature
         time_index = batch["elapsed_time"]  # (B,)
-        print(f"time_index: {time_index}")
-        print(time_index.shape)
         time_ratio = time_index / residual_chunk_size  # (B,) - normalized time index
         time_feature = torch.stack([
             torch.cos(2 *  np.pi * time_index / residual_chunk_size),
@@ -266,7 +262,6 @@ def train(cfg: TrainPipelineConfig):
         # Normalize language embeddings
         lang_emb_dim = lang_emb.shape[-1]
         lang_emb = lang_emb * math.sqrt(lang_emb_dim)
-        
         converted_batch = {
             "observation.images.image": batch["observation.images.image"],
             "observation.images.wrist_image": batch["observation.images.wrist_image"],

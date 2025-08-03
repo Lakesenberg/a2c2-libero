@@ -175,8 +175,8 @@ class ResidualACTConfig(PreTrainedConfig):
 
     @property
     def observation_delta_indices(self) -> None:
-        return [0]
-
+        return None
+    
     @property
     def action_delta_indices(self) -> list:
         # need one more index for the action at time t+1 to calculate the interpolated action

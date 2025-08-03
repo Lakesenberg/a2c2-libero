@@ -516,26 +516,7 @@ class ResidualACT(nn.Module):
         elif batch["action"].shape[1] == 1:     
             # If we are in inference mode, we still need to pass the predicted action as a token.
             encoder_in_tokens.append(self.encoder_predicted_action_input_proj(batch["action"]))
-        
-        # Language embedding tokens
-        if "language_embedding" in batch:
-            language_emb = batch["language_embedding"]  # (B, token_length, 960)
-            # Ensure the language embeddings are in the expected type (float) since they are usually in bfloat16.
-            language_emb = language_emb.to(dtype=torch.float32)
-            batch_size, token_length, _ = language_emb.shape
-            
-            # Project language embeddings to model dimension
-            language_tokens = self.encoder_language_input_proj(language_emb)  # (B, token_length, dim_model)
-            
-            # Add positional embeddings
-            language_pos_embed = self.encoder_language_pos_embed[:token_length].unsqueeze(1)
-            
-            # Rearrange to (token_length, batch, dim) and add to encoder inputs
-            language_tokens = language_tokens.transpose(0, 1)  # (token_length, B, dim_model)
-            
-            # Extend encoder inputs with language tokens
-            encoder_in_tokens.extend(list(language_tokens))
-            encoder_in_pos_embed.extend(list(language_pos_embed))
+
 
         if self.config.image_features:
             # For a list of images, the H and W may vary but H*W is constant.
@@ -554,6 +535,26 @@ class ResidualACT(nn.Module):
                 # Convert to list to extend properly
                 encoder_in_tokens.extend(list(cam_features))
                 encoder_in_pos_embed.extend(list(cam_pos_embed))
+        # Language embedding tokens
+        if "language_embedding" in batch:
+            language_emb = batch["language_embedding"]  # (B, token_length, 960)
+            # Ensure the language embeddings are in the expected type (float) since they are usually in bfloat16.
+            print(f"Language embedding dtype: {language_emb.dtype}")
+            language_emb = language_emb.to(dtype=torch.float32)
+            batch_size, token_length, _ = language_emb.shape
+            
+            # Project language embeddings to model dimension
+            language_tokens = self.encoder_language_input_proj(language_emb)  # (B, token_length, dim_model)
+            
+            # Add positional embeddings
+            language_pos_embed = self.encoder_language_pos_embed[:token_length].unsqueeze(1)
+            
+            # Rearrange to (token_length, batch, dim) and add to encoder inputs
+            language_tokens = language_tokens.transpose(0, 1)  # (token_length, B, dim_model)
+            
+            # Extend encoder inputs with language tokens
+            encoder_in_tokens.extend(list(language_tokens))
+            encoder_in_pos_embed.extend(list(language_pos_embed))
                 
         # Stack all tokens along the sequence dimension.
         encoder_in_tokens = torch.stack(encoder_in_tokens, axis=0)
