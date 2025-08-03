@@ -243,8 +243,8 @@ def train(cfg: TrainPipelineConfig):
             "task": batch["task"],
         }
         print(f"Convert raw batch to residualact took {time.perf_counter() - time_start:.3f} seconds")
-        
-        predicted_action_chunk = base_policy.predict_action_chunk(smol_vla_batch)
+        with torch.inference_mode():
+            predicted_action_chunk = base_policy.predict_action_chunk(smol_vla_batch)
         
         print(f"Predict action chunk took {time.perf_counter() - time_start:.3f} seconds")
         
