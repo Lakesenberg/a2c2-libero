@@ -66,8 +66,8 @@ for i in range(len(base_dataset)):
     
     new_dataset.add_frame(
         {
-            "observation.images.image": base_dataset[i]["observation.images.image"].permute(2, 0, 1),
-            "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"].permute(2, 0, 1),
+            "observation.images.image": base_dataset[i]["observation.images.image"].permute(1, 2, 0),
+            "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"].permute(1, 2, 0),
             "observation.state": base_dataset[i]["observation.state"],
             "action": base_dataset[i]["action"],
             "predicted_action": predicted_action[time_index].cpu(),
