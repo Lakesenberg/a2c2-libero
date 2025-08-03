@@ -55,7 +55,7 @@ for i in range(len(base_dataset)):
                 "observation.images.image": base_dataset[i]["observation.images.image"][0].unsqueeze(0).to("cuda"),
                 "observation.images.wrist_image": base_dataset[i]["observation.state"][0].unsqueeze(0).to("cuda"),
                 "observation.state": base_dataset[i]["observation.state"][0].unsqueeze(0).to("cuda"),
-                "task": base_dataset[i]["task"].unsqueeze(0).to("cuda"),
+                "task": base_dataset[i]["task"]
             }
         )
         time_index = 0
