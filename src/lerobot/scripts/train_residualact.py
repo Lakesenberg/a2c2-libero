@@ -238,7 +238,9 @@ def train(cfg: TrainPipelineConfig):
         
         
         # add time feature
-        time_index = batch["elapsed_time"].squeeze(1).to(device)  # (B,)
+        time_index = batch["elapsed_time"]  # (B,)
+        print(f"time_index: {time_index}")
+        print(time_index.shape)
         time_ratio = time_index / residual_chunk_size  # (B,) - normalized time index
         time_feature = torch.stack([
             torch.cos(2 *  np.pi * time_index / residual_chunk_size),
