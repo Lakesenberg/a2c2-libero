@@ -44,10 +44,11 @@ episode_index = 0
 for i in range(len(base_dataset)):
     # save the episode i
     if episode_index != base_dataset[i]["episode_index"]:
+        print("Saving episode", episode_index)
         new_dataset.save_episode()
         episode_index = base_dataset[i]["episode_index"]
-        
-    
+        print(f"Starting episode {episode_index}")
+        time_index = 0
     # show the first 10 images
     if time_index == 49 or len(predicted_action) == 0:
         predicted_action = base_policy.predict_action_chunk(
@@ -62,16 +63,17 @@ for i in range(len(base_dataset)):
     
     new_dataset.add_frame(
         {
-            "observation.images.image": base_dataset[i]["observation.images.image"][0],
-            "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"][0],
-            "observation.state": base_dataset[i]["observation.state"][0],
-            "action": base_dataset[i]["action"][0],
+            "observation.images.image": base_dataset[i]["observation.images.image"],
+            "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"],
+            "observation.state": base_dataset[i]["observation.state"],
+            "action": base_dataset[i]["action"],
             "predicted_action": predicted_action[time_index].cpu(),
             "elapsed_time": time_index,
         },
         task=base_dataset[i]["task"],
     )
     print(f"Processed episode {episode_index}, frame {i}, time index {time_index}")
+    time_index += 1
 
 # Save the last episode
 new_dataset.save_episode()
