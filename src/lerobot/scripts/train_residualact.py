@@ -234,7 +234,7 @@ def train(cfg: TrainPipelineConfig):
         - language_embedding: (B, D) - language embeddings
         """
         batch_size = batch["observation.images.image"].shape[0]
-        
+        time_start = time.perf_counter()
         # use first frame of state horizon for smolVLA
         smol_vla_batch = {
             "observation.images.image": torch.stack([batch["observation.images.image"][i, 0] for i in range(batch_size)]).to(device),
@@ -242,7 +242,11 @@ def train(cfg: TrainPipelineConfig):
             "observation.state": torch.stack([batch["observation.state"][i, 0] for i in range(batch_size)]).to(device),
             "task": batch["task"],
         }
+        print(f"Convert raw batch to residualact took {time.perf_counter() - time_start:.3f} seconds")
+        
         predicted_action_chunk = base_policy.predict_action_chunk(smol_vla_batch)
+        
+        print(f"Predict action chunk took {time.perf_counter() - time_start:.3f} seconds")
         
         #get random time index from non-padded actions to ensure time_index+1 is also valid
         # Find the last non-padded index for each batch sample
@@ -287,7 +291,7 @@ def train(cfg: TrainPipelineConfig):
         # predicted_action_chunk から time_index のアクションを取得
         predicted_action_time_t = torch.stack([predicted_action_chunk[i, time_index[i]].to(device) for i in range(batch_size)]) # (Batch, action_dim)
         predicted_action_time_t = predicted_action_time_t.unsqueeze(1)  # (batch_size, 1, action_dim)
-
+        
         predicted_action_plus_target_action = torch.cat(
             [
                 predicted_action_time_t,  # predicted action chunk
@@ -295,6 +299,7 @@ def train(cfg: TrainPipelineConfig):
             ],
             dim=1,
         ).to(device)
+        print(f"Action interpolation took {time.perf_counter() - time_start:.3f} seconds")
         
         
         converted_batch = {
@@ -307,6 +312,7 @@ def train(cfg: TrainPipelineConfig):
             "time_feature": time_feature,
             "language_embedding": base_policy.model.language_embeddings.to(device),
         }
+        print(f"Batch conversion took {time.perf_counter() - time_start:.3f} seconds")
         return converted_batch
 
     logging.info("Start offline training on a fixed dataset")
