@@ -66,10 +66,10 @@ for i in range(len(base_dataset)):
             "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"][0],
             "observation.state": base_dataset[i]["observation.state"][0],
             "action": base_dataset[i]["action"][0],
-            "task" : base_dataset[i]["task"],
             "predicted_action": predicted_action[time_index].cpu(),
             "elapsed_time": time_index,
-        }
+        },
+        task=base_dataset[i]["task"],
     )
     print(f"Processed episode {episode_index}, frame {i}, time index {time_index}")
 
