@@ -66,11 +66,12 @@ for i in range(len(base_dataset)):
             "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"][0],
             "observation.state": base_dataset[i]["observation.state"][0],
             "action": base_dataset[i]["action"][0],
+            "task" : base_dataset[i]["task"],
             "predicted_action": predicted_action[time_index].cpu(),
             "elapsed_time": time_index,
         }
     )
-    print(f"Processed frame {i+1}/{len(base_dataset)}", end="\r")
+    print(f"Processed episode {episode_index}, frame {i}, time index {time_index}")
 
 # Save the last episode
 new_dataset.save_episode()
