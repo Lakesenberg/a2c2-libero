@@ -32,6 +32,11 @@ new_features = {**base_dataset.features,
                 "shape": (1,),
                 "names": ["elapsed_time"],
             },
+                "language_embedding": {
+                "dtype": "float32",
+                "shape": (960,),
+                "names": ["language_embedding"],
+            }   
 }  
 print(f"Base dataset features: {base_dataset.features}")
 print(f"New dataset features: {new_features}")
@@ -71,6 +76,7 @@ for i in range(len(base_dataset)):
         )
         predicted_action = predicted_action.squeeze(0)  # Remove batch dimension
         predicted_action = predicted_action.cpu()  # Move to CPU
+        language_embedding = base_policy.model.language_embeddings.unsqueeze(0).cpu()  # Move to CPU
         time_index = 0
     
     new_dataset.add_frame(
@@ -81,6 +87,7 @@ for i in range(len(base_dataset)):
             "action": base_dataset[i]["action"],
             "predicted_action": predicted_action[time_index],
             "elapsed_time": np.array([time_index], dtype=np.int64),  # Create array with shape (1,)
+            "language_embedding": language_embedding  # Remove batch dimension
         },
         task=base_dataset[i]["task"],
     )
