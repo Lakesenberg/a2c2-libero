@@ -48,10 +48,15 @@ for i in range(len(base_dataset)):
         print("Saving episode", episode_index)
         new_dataset.save_episode()
         episode_index = base_dataset[i]["episode_index"]
-        print(f"Starting episode {episode_index}")
+        print(f"Starting episode {episode_index}")]
+        # Reset predicted action
+        # Reset time index
         time_index = 0
+        predicted_action = [] 
+
     # show the first 10 images
-    if time_index == 49 or len(predicted_action) == 0:
+    if time_index == 50 or len(predicted_action) == 0:
+        print("Generating predicted action for episode", episode_index, "frame", i)
         predicted_action = base_policy.predict_action_chunk(
             {
                 "observation.images.image": base_dataset[i]["observation.images.image"].unsqueeze(0).to("cuda"),
@@ -62,7 +67,6 @@ for i in range(len(base_dataset)):
         )
         predicted_action = predicted_action.squeeze(0)  # Remove batch dimension
         time_index = 0
-    print(predicted_action.shape)
     
     new_dataset.add_frame(
         {
@@ -75,7 +79,8 @@ for i in range(len(base_dataset)):
         },
         task=base_dataset[i]["task"],
     )
-    print(f"Processed episode {episode_index}, frame {i}, time index {time_index}")
+    if i % 1000 == 0:
+        print(f"Processed episode {episode_index}, frame {i} / {len(base_dataset)}, time index {time_index}")
     time_index += 1
 
 # Save the last episode
