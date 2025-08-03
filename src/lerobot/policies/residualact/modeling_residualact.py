@@ -539,7 +539,6 @@ class ResidualACT(nn.Module):
         if "language_embedding" in batch:
             language_emb = batch["language_embedding"]  # (B, token_length, 960)
             # Ensure the language embeddings are in the expected type (float) since they are usually in bfloat16.
-            print(f"Language embedding dtype: {language_emb.dtype}")
             language_emb = language_emb.to(dtype=torch.float32)
             batch_size, token_length, _ = language_emb.shape
             
