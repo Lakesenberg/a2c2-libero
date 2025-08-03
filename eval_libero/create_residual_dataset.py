@@ -71,7 +71,7 @@ for i in range(len(base_dataset)):
             "observation.state": base_dataset[i]["observation.state"],
             "action": base_dataset[i]["action"],
             "predicted_action": predicted_action[time_index].cpu(),
-            "elapsed_time": np.array(time_index, dtype=np.int64),
+            "elapsed_time": np.array([time_index], dtype=np.int64),  # Create array with shape (1,)
         },
         task=base_dataset[i]["task"],
     )
