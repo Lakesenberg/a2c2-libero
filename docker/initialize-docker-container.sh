@@ -1,7 +1,7 @@
 #!/bin/bash
 source ~/.bashrc
 cd ~/lerobot && uv venv -p 3.10
-cd ~/lerobot && uv pip install --no-cache ".[all]"
+cd ~/lerobot && uv pip install --no-cache ".[smolvla]"
 
 # git safe directory
 cd ~/lerobot && git config --global --add safe.directory /root/lerobot
