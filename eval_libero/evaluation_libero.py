@@ -19,105 +19,119 @@ from libero.libero.envs import OffScreenRenderEnv
 from tqdm import tqdm
 
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.policies.residualact.modeling_residualact import ResidualACTPolicy
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 
-
-
-def normalize_gripper_action(action, binarize=True):
-    """
-    Changes gripper action (last dimension of action vector) from [0,1] to [-1,+1].
-    Necessary for some environments (not Bridge) because the dataset wrapper standardizes gripper actions to [0,1].
-    Note that unlike the other action dimensions, the gripper action is not normalized to [-1,+1] by default by
-    the dataset wrapper.
-
-    Normalization formula: y = 2 * (x - orig_low) / (orig_high - orig_low) - 1
-    """
-    # Just normalize the last action to [-1,+1].
-    orig_low, orig_high = 0.0, 1.0
-    action[..., -1] = 2 * (action[..., -1] - orig_low) / (orig_high - orig_low) - 1
-
-    if binarize:
-        # Binarize to -1 or +1.
-        action[..., -1] = np.sign(action[..., -1])
-
-    return action
-
-
-def invert_gripper_action(action):
-    """
-    Flips the sign of the gripper action (last dimension of action vector).
-    This is necessary for some environments where -1 = open, +1 = close, since
-    the RLDS dataloader aligns gripper actions such that 0 = close, 1 = open.
-    """
-    action[..., -1] = action[..., -1] * -1.0
-    return action
-
-
-@dataclasses.dataclass
-class Args:
-    """
-    Evaluation arguments for smolVLA on LIBERO.
-    """
-
-    # --- Hugging Face arguments ---
-    policy_path: str = "lerobot/smolvla_base"
-    """Path to the pretrained policy on the Hugging Face Hub or local directory."""
-
-    # --- LIBERO environment-specific parameters ---
-    task_suite_name: str = "libero_spatial"
-    """Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90"""
-    num_steps_wait: int = 10
-    """Number of steps to wait for objects to stabilize in sim."""
-    num_trials_per_task: int = 1
-    """Number of rollouts per task."""
-
-    # --- Evaluation arguments ---
-    video_out_path: str = "data/libero/videos"
-    """Path to save videos."""
-    device: str = "cuda"
-    """Device to use for evaluation."""
-
-    seed: int = 7
-    """Random Seed (for reproducibility)"""
-
+CHUNK_SIZE = 50
+NUM_STEPS_WAIT = 10
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 @draccus.wrap()
-def eval_libero(args: Args) -> None:
+def eval_libero() -> None:
+    base_policy_path: str = "k1000dai/smolvla_libero_scratch"
+    residual_policy_path: str = "k1000dai/residualact_libero"
+    task_suite_name: str = "libero_spatial" # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+    num_trials_per_task: int = 10 # Number of rollouts per task.
+    video_out_base_path: str = "data/libero/videos"
+    json_out_path: str = "data/libero/results.json"
+    seed = 7 
     # Set random seed
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
     # --- Load Policy ---
-    policy = SmolVLAPolicy.from_pretrained(args.policy_path)
-    policy.to(args.device)
-    policy.eval()
+    base_policy = SmolVLAPolicy.from_pretrained(base_policy_path)
+    base_policy.to(DEVICE)
+    base_policy.eval()
+    
+    residual_policy = ResidualACTPolicy.from_pretrained(residual_policy_path)
+    residual_policy.to(DEVICE)
+    residual_policy.eval()
+    
+    # FIRST: Evaluate without residual policy
+    logging.info("=== Evaluating without residual policy ===")
+    for inference_delay in range(10):
+        for execute_horizon in range(CHUNK_SIZE-inference_delay):
+            logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
+            video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}"
+            results = eval_libero(
+                base_policy=base_policy,
+                residual_policy=residual_policy,
+                use_residual_policy=False,
+                task_suite_name=task_suite_name,
+                num_trials_per_task=num_trials_per_task,
+                seed=seed,
+                execute_horizon=execute_horizon,
+                inference_delay=inference_delay,
+                video_out_path=str(video_out_path)
+            )
+            with open(json_out_path, "a") as f:
+                f.write(f"{results}\n")
+            logging.info(f"Results without residual policy: {results}")
 
-    # --- Initialize LIBERO task suite ---
+    # SECOND: Evaluate with residual policy
+    logging.info("=== Evaluating with residual policy ===")
+    for inference_delay in range(10):
+        for execute_horizon in range(CHUNK_SIZE-inference_delay):
+            logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
+            video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}_residual"
+            results = eval_libero(
+                base_policy=base_policy,
+                residual_policy=residual_policy,
+                use_residual_policy=True,
+                task_suite_name=task_suite_name,
+                num_trials_per_task=num_trials_per_task,
+                seed=seed,
+                execute_horizon=execute_horizon,
+                inference_delay=inference_delay,
+                video_out_path=str(video_out_path)
+            )
+            with open(json_out_path, "a") as f:
+                f.write(f"{results}\n")
+            logging.info(f"Results with residual policy: {results}")
+
+    # Log final results
+    logging.info("=== Evaluation completed ===")
+    logging.info(f"Results saved to {json_out_path}")
+    logging.info(f"Videos saved to {video_out_base_path}")
+
+def eval_libero(base_policy: SmolVLAPolicy, 
+                residual_policy:ResidualACTPolicy, 
+                use_residual_policy: bool = True,
+                task_suite_name: str = "libero_spatial", 
+                num_trials_per_task: int = 10, 
+                seed: int = 7,
+                execute_horizon: int = 10, 
+                inference_delay: int = 0, 
+                video_out_path: str = "data/libero/videos"
+                ) -> dict:
+    if use_residual_policy:
+        print("====  USE RESIDUAL POLICY ====")
     benchmark_dict = benchmark.get_benchmark_dict()
     try:
-        task_suite = benchmark_dict[args.task_suite_name]()
+        task_suite = benchmark_dict[task_suite_name]()
     except KeyError:
         raise ValueError(
-            f"Unknown task suite: {args.task_suite_name}. "
+            f"Unknown task suite: {task_suite_name}. "
             f"Available options are: {list(benchmark_dict.keys())}"
         )
     num_tasks_in_suite = task_suite.n_tasks
-    logging.info(f"Task suite: {args.task_suite_name}")
+    logging.info(f"Task suite: {task_suite_name}")
 
-    pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
+    pathlib.Path(video_out_path).mkdir(parents=True, exist_ok=True)
 
-    if args.task_suite_name == "libero_spatial":
+    if task_suite_name == "libero_spatial":
         max_steps = 220  # longest training demo has 193 steps
-    elif args.task_suite_name == "libero_object":
+    elif task_suite_name == "libero_object":
         max_steps = 280  # longest training demo has 254 steps
-    elif args.task_suite_name == "libero_goal":
+    elif task_suite_name == "libero_goal":
         max_steps = 300  # longest training demo has 270 steps
-    elif args.task_suite_name == "libero_10":
+    elif task_suite_name == "libero_10":
         max_steps = 520  # longest training demo has 505 steps
-    elif args.task_suite_name == "libero_90":
+    elif task_suite_name == "libero_90":
         max_steps = 400  # longest training demo has 373 steps
     else:
         # Fallback for custom task suites
@@ -133,12 +147,13 @@ def eval_libero(args: Args) -> None:
         initial_states = task_suite.get_task_init_states(task_id)
 
         # Initialize LIBERO environment and task description
-        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, seed)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
+        
         for episode_idx in tqdm(
-            range(min(args.num_trials_per_task, len(initial_states))),
+            range(min(num_trials_per_task, len(initial_states))),
             desc=f"Task {task_id}: {task.language}",
             leave=False,
         ):
@@ -146,20 +161,22 @@ def eval_libero(args: Args) -> None:
 
             # Reset environment and policy
             env.reset()
-            policy.reset()
+            base_policy.reset()
+            residual_policy.reset()
 
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
 
             # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
             # and we need to wait for them to fall
-            for _ in range(args.num_steps_wait):
+            for _ in range(NUM_STEPS_WAIT):
                 obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
 
             # Setup
             t = 0
             frames = []
             done = False
+            action_chunk = None
 
             # Add initial frame
             agentview_image = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
@@ -187,23 +204,57 @@ def eval_libero(args: Args) -> None:
                         "observation.images.image": torch.from_numpy(agentview_image / 255.0)
                         .permute(2, 0, 1)
                         .to(torch.float32)
-                        .to(args.device).unsqueeze(0),
+                        .to(DEVICE).unsqueeze(0),
                         "observation.images.wrist_image": torch.from_numpy(wrist_img / 255.0)
                         .permute(2, 0, 1)
                         .to(torch.float32)
-                        .to(args.device).unsqueeze(0),
-                        "observation.state": torch.from_numpy(state).to(torch.float32).to(args.device).unsqueeze(0),
+                        .to(DEVICE).unsqueeze(0),
+                        "observation.state": torch.from_numpy(state).to(torch.float32).to(DEVICE).unsqueeze(0),
                         "task": task_description,
                     }
 
-                    # Query model to get action
-                    with torch.inference_mode():
-                        action_tensor = policy.select_action(observation)
-                    action = action_tensor.cpu().numpy()[0]
-                    print(policy.model.language_embeddings.shape)
-                    # action = normalize_gripper_action(action, binarize=False)
-                    # action = invert_gripper_action(action)
-                    # Execute action in environment
+                    if action_chunk is None or not action_plan:
+                        new_action_chunk = base_policy.predict_action_chunk(observation)
+                        new_action_chunk = new_action_chunk.squeeze(0).cpu().numpy()
+
+                        if action_chunk is not None and inference_delay > 0:
+                            # Execute inference_delay actions from previous chunk, then remaining from new chunk
+                            actions_from_previous = action_chunk[:inference_delay]
+                            actions_from_new = new_action_chunk[inference_delay:execute_horizon]
+                            
+                            # Create execution plan for this cycle
+                            execution_plan = list(actions_from_previous) + list(actions_from_new)
+                            logging.debug(f"Using {len(actions_from_previous)} actions from previous chunk, {len(actions_from_new)} from new chunk")
+                        else:
+                            # First iteration or no delay - use new chunk directly
+                            execution_plan = list(new_action_chunk[:execute_horizon])
+                        action_chunk = np.concatenate([
+                            new_action_chunk[execute_horizon:],
+                            np.zeros((execute_horizon, new_action_chunk.shape[1]))
+                        ])
+                        
+                        # Convert to deque for compatibility with existing execution loop
+                        action_plan = collections.deque(execution_plan)
+                        
+                    if action_plan:
+                        action = action_plan.popleft()
+                    else:
+                        # Fallback - should not happen with correct logic
+                        logging.warning("No actions in plan, using zero action")
+                        action = np.zeros(7)
+
+                    if use_residual_policy:
+                        observation["action"] = torch.from_numpy(action).to(torch.float32).to(DEVICE).unsqueeze(0).unsqueeze(0)  # Add batch and sequence dimensions
+                        time_index = execute_horizon - len(action_plan) - 1
+                        if time_index < inference_delay:
+                            time_index += execute_horizon
+
+                        observation["time_feature"] = torch.tensor([np.cos(time_index/CHUNK_SIZE), np.sin(time_index/CHUNK_SIZE), time_index/CHUNK_SIZE], dtype=torch.float32).to(DEVICE).unsqueeze(0)
+                        observation["language_embedding"] = base_policy.model.language_embeddings
+                        
+                        updated_action = residual_policy.predict_action_chunk(observation).squeeze(0).cpu().numpy()[0]
+                        action = updated_action
+                    
                     obs, _, done, _ = env.step(action)
                     if done:
                         task_successes += 1
@@ -222,7 +273,7 @@ def eval_libero(args: Args) -> None:
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_").replace("/", "_")
             video_path = (
-                pathlib.Path(args.video_out_path) / f"rollout_task_{task_id}_episode_{episode_idx}_{task_segment}_{suffix}.mp4"
+                pathlib.Path(video_out_path) / f"rollout_task_{task_id}_episode_{episode_idx}_{task_segment}_{suffix}.mp4"
             )
             fps = 30
             writer = imageio.get_writer(video_path, fps=fps)
@@ -230,14 +281,7 @@ def eval_libero(args: Args) -> None:
             for image in frames:
                 writer.append_data(image)
             writer.close()
-            logging.info(f"Saved video to {video_path}")
             # import ipdb; ipdb.set_trace()
-
-            # Log current results
-            logging.info(f"Success: {done}")
-            if total_episodes > 0:
-                logging.info(f"# episodes completed so far: {total_episodes}")
-                logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
         # Log final results for the task
         if task_episodes > 0:
@@ -250,7 +294,17 @@ def eval_libero(args: Args) -> None:
         logging.info(f"Total success rate: {float(total_successes) / float(total_episodes):.2f}")
     logging.info(f"Total episodes: {total_episodes}")
     logging.info(f"Total successes: {total_successes}")
-    # cv2.destroyAllWindows()
+    return {
+        "execute_horizon": execute_horizon,
+        "inference_delay": inference_delay,
+        "task_suite_name": task_suite_name,
+        "num_trials_per_task": num_trials_per_task,
+        "use_residual_policy": use_residual_policy,
+        "total_episodes": total_episodes,
+        "total_successes": total_successes,
+        "success_rate": float(total_successes) / float(total_episodes) if total_episodes > 0 else 0.0,
+    }
+    
 
 
 def _get_libero_env(task, resolution, seed):
