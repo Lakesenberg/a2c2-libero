@@ -74,7 +74,7 @@ def eval() -> None:
     # SECOND: Evaluate with residual policy
     logging.info("=== Evaluating with residual policy ===")
     for inference_delay in range(10):
-        for execute_horizon in range(CHUNK_SIZE-inference_delay):
+        for execute_horizon in range(max(1, inference_delay),CHUNK_SIZE-inference_delay):
             logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
             video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}_residual"
             results = eval_libero(
