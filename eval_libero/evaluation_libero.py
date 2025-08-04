@@ -34,9 +34,10 @@ def eval() -> None:
     residual_policy_path: str = "k1000dai/residualact_libero"
     task_suite_name: str = "libero_spatial" # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     num_trials_per_task: int = 10 # Number of rollouts per task.
-    video_out_base_path: str = "data/libero/videos"
-    json_out_path: str = "data/libero/results.json"
-    seed = 7 
+    out_base_path = "data/libero"
+    video_out_base_path:pathlib.Path = pathlib.Path(os.path.join(out_base_path,f"videos_{task_suite_name}"))
+    json_out_path: str = f"data/libero/results_{task_suite_name}.jsonl"
+    seed = 7
     # Set random seed
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -53,7 +54,7 @@ def eval() -> None:
     # FIRST: Evaluate without residual policy
     logging.info("=== Evaluating without residual policy ===")
     for inference_delay in range(10):
-        for execute_horizon in range(CHUNK_SIZE-inference_delay):
+        for execute_horizon in range(max(1, inference_delay), CHUNK_SIZE-inference_delay):
             logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
             video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}"
             results = eval_libero(
@@ -179,8 +180,7 @@ def eval_libero(base_policy: SmolVLAPolicy,
 
             # Add initial frame
             agentview_image = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
-            # frames.append(agentview_image)
-            # import ipdb; ipdb.set_trace()
+            frames.append(agentview_image)
             logging.info(f"Starting episode {task_episodes+1}...")
             
             while t < max_steps:
@@ -213,7 +213,6 @@ def eval_libero(base_policy: SmolVLAPolicy,
                     }
 
                     if action_chunk is None or len(action_plan) == 0:
-                        print("Predicting new action chunk")
                         new_action_chunk = base_policy.predict_action_chunk(observation)
                         new_action_chunk = new_action_chunk.squeeze(0).cpu().numpy()
 
@@ -272,8 +271,9 @@ def eval_libero(base_policy: SmolVLAPolicy,
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_").replace("/", "_")
+            use_residual_suffix = "_residual" if use_residual_policy else ""
             video_path = (
-                pathlib.Path(video_out_path) / f"rollout_task_{task_id}_episode_{episode_idx}_{task_segment}_{suffix}.mp4"
+                pathlib.Path(video_out_path) / f"rollout_task_{task_id}_episode_{episode_idx}_{task_segment}_{suffix}{use_residual_suffix}.mp4"
             )
             fps = 30
             writer = imageio.get_writer(video_path, fps=fps)
