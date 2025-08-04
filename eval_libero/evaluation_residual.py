@@ -35,7 +35,7 @@ class Args:
     # --- Hugging Face arguments ---
     base_policy_path: str = "k1000dai/smolvla_libero_scratch"
 
-    residual_policy_path: str = "k1000dai/residualact_libero_40k"
+    residual_policy_path: str = "k1000dai/residualact_libero"
     """Path to the pretrained policy on the Hugging Face Hub or local directory."""
 
     # --- LIBERO environment-specific parameters ---
@@ -56,8 +56,8 @@ class Args:
     """Random Seed (for reproducibility)"""
     
     chunk_size: int = 50
-    execute_horizon: int = 45
-    inference_delay: int = 5
+    execute_horizon: int = 49
+    inference_delay: int = 1
     
     use_residual_policy: bool = True
 
