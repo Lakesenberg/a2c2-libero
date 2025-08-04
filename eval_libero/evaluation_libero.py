@@ -37,6 +37,9 @@ def eval() -> None:
     out_base_path = "data/libero"
     video_out_base_path:pathlib.Path = pathlib.Path(os.path.join(out_base_path,f"videos_{task_suite_name}"))
     json_out_path: str = f"data/libero/results_{task_suite_name}.jsonl"
+
+    inference_delay_list = [0,1,3,5,10]  # Inference delay in steps
+    execute_horizon_list = [1,5,10,20,30,40,50]  # Execute horizon in steps
     seed = 7
     # Set random seed
     torch.manual_seed(seed)
@@ -53,8 +56,12 @@ def eval() -> None:
     
     # FIRST: Evaluate without residual policy
     logging.info("=== Evaluating without residual policy ===")
-    for inference_delay in range(10):
-        for execute_horizon in range(max(1, inference_delay), CHUNK_SIZE-inference_delay):
+    for inference_delay in inference_delay_list:
+        for execute_horizon in execute_horizon_list:
+            if execute_horizon < inference_delay:
+                continue
+            if execute_horizon+ inference_delay > CHUNK_SIZE:
+                continue
             logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
             video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}"
             results = eval_libero(
@@ -73,9 +80,12 @@ def eval() -> None:
             logging.info(f"Results without residual policy: {results}")
 
     # SECOND: Evaluate with residual policy
-    logging.info("=== Evaluating with residual policy ===")
-    for inference_delay in range(10):
-        for execute_horizon in range(max(1, inference_delay),CHUNK_SIZE-inference_delay):
+    for inference_delay in inference_delay_list:
+        for execute_horizon in execute_horizon_list:
+            if execute_horizon < inference_delay:
+                continue
+            if execute_horizon+ inference_delay > CHUNK_SIZE:
+                continue
             logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
             video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}_residual"
             results = eval_libero(
