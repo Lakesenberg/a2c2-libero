@@ -118,7 +118,7 @@ class ResidualACTConfig(PreTrainedConfig):
     # Note: Although the original ACT implementation has 7 for `n_decoder_layers`, there is a bug in the code
     # that means only the first layer is used. Here we match the original implementation by setting this to 1.
     # See this issue https://github.com/tonyzhaozh/act/issues/25#issue-2258740521.
-    n_decoder_layers: int = 1
+    n_decoder_layers: int = 7 # 1
     # VAE.
     use_vae: bool = True
     latent_dim: int = 32
@@ -175,12 +175,12 @@ class ResidualACTConfig(PreTrainedConfig):
 
     @property
     def observation_delta_indices(self) -> None:
-        return list(range(self.chunk_size))
-
+        return None
+    
     @property
     def action_delta_indices(self) -> list:
         # need one more index for the action at time t+1 to calculate the interpolated action
-        return list(range(self.chunk_size+1))
+        return [0,1]
 
     @property
     def reward_delta_indices(self) -> None:
