@@ -29,8 +29,7 @@ CHUNK_SIZE = 50
 NUM_STEPS_WAIT = 10
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-@draccus.wrap()
-def eval_libero() -> None:
+def eval() -> None:
     base_policy_path: str = "k1000dai/smolvla_libero_scratch"
     residual_policy_path: str = "k1000dai/residualact_libero"
     task_suite_name: str = "libero_spatial" # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
@@ -304,7 +303,6 @@ def eval_libero(base_policy: SmolVLAPolicy,
         "total_successes": total_successes,
         "success_rate": float(total_successes) / float(total_episodes) if total_episodes > 0 else 0.0,
     }
-    
 
 
 def _get_libero_env(task, resolution, seed):
@@ -342,4 +340,4 @@ def _quat2axisangle(quat):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    eval_libero()
+    eval()
