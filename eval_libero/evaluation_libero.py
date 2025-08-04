@@ -212,7 +212,8 @@ def eval_libero(base_policy: SmolVLAPolicy,
                         "task": task_description,
                     }
 
-                    if action_chunk is None or not action_plan:
+                    if action_chunk is None or len(action_plan) == 0:
+                        print("Predicting new action chunk")
                         new_action_chunk = base_policy.predict_action_chunk(observation)
                         new_action_chunk = new_action_chunk.squeeze(0).cpu().numpy()
 
