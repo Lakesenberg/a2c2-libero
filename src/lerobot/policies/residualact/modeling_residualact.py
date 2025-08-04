@@ -511,11 +511,9 @@ class ResidualACT(nn.Module):
         encoder_in_tokens.append(
             self.encoder_time_feature_input_proj(batch["time_feature"])
         )
-        if batch["action"].shape[1] > 1: #batch["action"] has shape (B, S, D) where S is chunk_size + 1, first action is the predicted action
-            encoder_in_tokens.append(self.encoder_predicted_action_input_proj(batch["action"][:, 0]))
-        elif batch["action"].shape[1] == 1:     
-            # If we are in inference mode, we still need to pass the predicted action as a token.
-            encoder_in_tokens.append(self.encoder_predicted_action_input_proj(batch["action"]))
+        
+        #batch["action"] has shape (B, S, D) where S is chunk_size + 1, first action is the predicted action 
+        encoder_in_tokens.append(self.encoder_predicted_action_input_proj(batch["action"][:, 0]))
 
 
         if self.config.image_features:
