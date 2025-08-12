@@ -31,12 +31,13 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def eval() -> None:
     base_policy_path: str = "k1000dai/smolvla_libero_scratch"
-    residual_policy_path: str = "k1000dai/residualact_libero"
+    residual_policy_path: str = "k1000dai/residualact_libero_small_200k"
     num_trials_per_task: int = 10 # Number of rollouts per task.
     out_base_path = "data/libero"
     
     task_suite_name_list = [ "libero_spatial", "libero_object", "libero_goal", "libero_10"]
     time_pair = [(0,1),(0,5),(0,10),(0,30),(0,40),(0,50),(1,10),(3,10),(5,10),(10,10),(1,40),(3,40),(5,40),(10,40)]
+    time_pair.reverse()  # Reverse to start with the smallest execute_horizon and inference_delay
     seed = 7
     # Set random seed
     torch.manual_seed(seed)
@@ -62,23 +63,23 @@ def eval() -> None:
                 continue
             if execute_horizon+ inference_delay > CHUNK_SIZE:
                 continue
-            # FIRST: Evaluate without residual policy
-            logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
-            video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}"
-            results = eval_libero(
-                base_policy=base_policy,
-                residual_policy=residual_policy,
-                use_residual_policy=False,
-                task_suite_name=task_suite_name,
-                num_trials_per_task=num_trials_per_task,
-                seed=seed,
-                execute_horizon=execute_horizon,
-                inference_delay=inference_delay,
-                video_out_path=str(video_out_path)
-            )
-            with open(json_out_path, "a") as f:
-                f.write(f"{results}\n")
-            logging.info(f"Results without residual policy: {results}")
+            # # FIRST: Evaluate without residual policy
+            # logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
+            # video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}"
+            # results = eval_libero(
+            #     base_policy=base_policy,
+            #     residual_policy=residual_policy,
+            #     use_residual_policy=False,
+            #     task_suite_name=task_suite_name,
+            #     num_trials_per_task=num_trials_per_task,
+            #     seed=seed,
+            #     execute_horizon=execute_horizon,
+            #     inference_delay=inference_delay,
+            #     video_out_path=str(video_out_path)
+            # )
+            # with open(json_out_path, "a") as f:
+            #     f.write(f"{results}\n")
+            # logging.info(f"Results without residual policy: {results}")
 
             # SECOND: Evaluate with residual policy
             logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
@@ -182,7 +183,7 @@ def eval_libero(base_policy: SmolVLAPolicy,
             frames = []
             done = False
             action_chunk = None
-
+            first_execution = True
             # Add initial frame
             agentview_image = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
             frames.append(agentview_image)
@@ -229,6 +230,7 @@ def eval_libero(base_policy: SmolVLAPolicy,
                             # Create execution plan for this cycle
                             execution_plan = list(actions_from_previous) + list(actions_from_new)
                             logging.debug(f"Using {len(actions_from_previous)} actions from previous chunk, {len(actions_from_new)} from new chunk")
+                            first_execution = False
                         else:
                             # First iteration or no delay - use new chunk directly
                             execution_plan = list(new_action_chunk[:execute_horizon])
@@ -250,7 +252,7 @@ def eval_libero(base_policy: SmolVLAPolicy,
                     if use_residual_policy:
                         observation["action"] = torch.from_numpy(action).to(torch.float32).to(DEVICE).unsqueeze(0).unsqueeze(0)  # Add batch and sequence dimensions
                         time_index = execute_horizon - len(action_plan) - 1
-                        if time_index < inference_delay:
+                        if time_index < inference_delay and not first_execution:
                             time_index += execute_horizon
 
                         observation["time_feature"] = torch.tensor([np.cos(2 * np.pi * time_index/CHUNK_SIZE), np.sin(2 * np.pi * time_index/CHUNK_SIZE), time_index/CHUNK_SIZE], dtype=torch.float32).to(DEVICE).unsqueeze(0)
