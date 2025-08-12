@@ -32,14 +32,11 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 def eval() -> None:
     base_policy_path: str = "k1000dai/smolvla_libero_scratch"
     residual_policy_path: str = "k1000dai/residualact_libero"
-    task_suite_name: str = "libero_spatial" # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     num_trials_per_task: int = 10 # Number of rollouts per task.
     out_base_path = "data/libero"
-    video_out_base_path:pathlib.Path = pathlib.Path(os.path.join(out_base_path,f"videos_{task_suite_name}"))
-    json_out_path: str = f"data/libero/results_{task_suite_name}.jsonl"
-
-    inference_delay_list = [0,1,3,5,10]  # Inference delay in steps
-    execute_horizon_list = [1,5,10,20,30,40,50]  # Execute horizon in steps
+    
+    task_suite_name_list = [ "libero_spatial", "libero_object", "libero_goal", "libero_10"]
+    time_pair = [(0,1),(0,5),(0,10),(0,30),(0,40),(0,50),(1,10),(3,10),(5,10),(10,10),(1,40),(3,40),(5,40),(10,40)]
     seed = 7
     # Set random seed
     torch.manual_seed(seed)
@@ -54,14 +51,18 @@ def eval() -> None:
     residual_policy.to(DEVICE)
     residual_policy.eval()
     
-    # FIRST: Evaluate without residual policy
+
     logging.info("=== Evaluating without residual policy ===")
-    for inference_delay in inference_delay_list:
-        for execute_horizon in execute_horizon_list:
+    for task_suite_name in task_suite_name_list:
+        video_out_base_path:pathlib.Path = pathlib.Path(os.path.join(out_base_path,f"videos_{task_suite_name}"))
+        json_out_path: str = f"data/libero/results_{task_suite_name}.jsonl"
+        
+        for inference_delay, execute_horizon in time_pair:
             if execute_horizon < inference_delay:
                 continue
             if execute_horizon+ inference_delay > CHUNK_SIZE:
                 continue
+            # FIRST: Evaluate without residual policy
             logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
             video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}"
             results = eval_libero(
@@ -79,13 +80,7 @@ def eval() -> None:
                 f.write(f"{results}\n")
             logging.info(f"Results without residual policy: {results}")
 
-    # SECOND: Evaluate with residual policy
-    for inference_delay in inference_delay_list:
-        for execute_horizon in execute_horizon_list:
-            if execute_horizon < inference_delay:
-                continue
-            if execute_horizon+ inference_delay > CHUNK_SIZE:
-                continue
+            # SECOND: Evaluate with residual policy
             logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
             video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}_residual"
             results = eval_libero(
@@ -258,7 +253,7 @@ def eval_libero(base_policy: SmolVLAPolicy,
                         if time_index < inference_delay:
                             time_index += execute_horizon
 
-                        observation["time_feature"] = torch.tensor([np.cos(time_index/CHUNK_SIZE), np.sin(time_index/CHUNK_SIZE), time_index/CHUNK_SIZE], dtype=torch.float32).to(DEVICE).unsqueeze(0)
+                        observation["time_feature"] = torch.tensor([np.cos(2 * np.pi * time_index/CHUNK_SIZE), np.sin(2 * np.pi * time_index/CHUNK_SIZE), time_index/CHUNK_SIZE], dtype=torch.float32).to(DEVICE).unsqueeze(0)
                         observation["language_embedding"] = base_policy.model.language_embeddings
                         
                         updated_action = residual_policy.predict_action_chunk(observation).squeeze(0).cpu().numpy()[0]
