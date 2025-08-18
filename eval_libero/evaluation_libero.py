@@ -36,7 +36,7 @@ def eval() -> None:
     out_base_path = "data/libero"
     
     task_suite_name_list = [ "libero_spatial", "libero_object", "libero_goal", "libero_10"]
-    time_pair = [(0,1),(0,5),(0,10),(0,30),(0,40),(0,50),(1,10),(3,10),(5,10),(10,10),(1,40),(3,40),(5,40),(10,40)]
+    time_pair = [(0,5),(0,10),(0,30),(0,40),(0,50),(1,10),(3,10),(5,10),(10,10),(1,40),(3,40),(5,40),(10,40)]
     time_pair.reverse()  # Reverse to start with the smallest execute_horizon and inference_delay
     seed = 7
     # Set random seed

@@ -329,17 +329,6 @@ def train(cfg: TrainPipelineConfig):
             lang_emb = vlm.embed_language_tokens(lang_tokens)
             lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
             batch["language_embedding"] = lang_emb
-
-            train_tracker, output_dict = update_policy(
-                train_tracker,
-                policy,
-                batch,
-                optimizer,
-                cfg.optimizer.grad_clip_norm,
-                grad_scaler=grad_scaler,
-                lr_scheduler=lr_scheduler,
-                use_amp=cfg.policy.use_amp,
-            )
         else:
             raise ValueError("Batch is not a ResidualActTimeSliceDataset")
         
