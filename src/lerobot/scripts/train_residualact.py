@@ -194,9 +194,10 @@ class ResidualActTimeSliceDataset(Dataset):
         a_t = s["action"][0]
         a_tp1 = s["action"][1]
         action_interp = self._interpolate_action(a_t, a_tp1)  # (chunk, A)
+        predicted_action = s_base["vla_actions"][time_offset].unsqueeze(0)
         predicted_action_plus_target_action = torch.cat(
             [
-                s_base["vla_actions"][time_offset],
+                predicted_action,
                 action_interp
             ],
             dim=0,
