@@ -42,13 +42,15 @@ See the [create_residual_dataset.py](eval_libero/create_residual_dataset.py) for
 
 ### Residual ACT
 ```bash
-python src/lerobot/scripts/train_residualact.py \ 
+python src/lerobot/scripts/train_residualact.py \
 --policy.type residualact \
---policy.repo_id test_residual \
+--policy.repo_id residualact_libero_smolvla_singleaction \
 --batch_size 64 \
---steps 100000 \
---dataset.repo_id k1000dai/libero-addinfo \
---output_dir output_residualact \
+--num_workers 16 \
+--steps 400000 \
+--dataset.repo_id k1000dai/libero-smolvla \
+--output_dir output_residualact_libero_smolvla_singleaction \
+--job_name residualact_libero_smolvla_singleaction \
 --wandb.enable True
 ```
 

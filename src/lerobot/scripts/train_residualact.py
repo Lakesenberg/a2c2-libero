@@ -40,7 +40,9 @@ from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
 from lerobot.policies.smolvla.smolvlm_with_expert import SmolVLMWithExpertModel
 from transformers import AutoProcessor
+from torch.utils.data import Dataset
 import math
+from bisect import bisect_right
 
 from lerobot.utils.train_utils import (
     get_step_checkpoint_dir,
@@ -109,6 +111,109 @@ def update_policy(
     train_metrics.update_s = time.perf_counter() - start_time
     return train_metrics, output_dict
 
+class ResidualActTimeSliceDataset(Dataset):
+    """Wrap a sequence dataset and return single-time-step samples with interpolated action chunk.
+
+    This avoids stacking (B, T, ...) in collate and reduces IPC/memory.
+    """
+
+    def __init__(self, base_dataset: Dataset, residual_chunk_size: int, tokenizer):
+        self.base = base_dataset
+        self.chunk_size = residual_chunk_size
+        self.tokenizer = tokenizer
+        # pad id for language tokens
+        self.pad_id = getattr(self.tokenizer, "pad_token_id", 0)
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def __getattr__(self, name: str):
+        # Delegate attributes like num_frames, num_episodes, meta, episode_data_index, etc.
+        try:
+            return super().__getattribute__(name)
+        except AttributeError:
+            return getattr(self.base, name)
+
+    def _sample_time_offset(self, idx: int) -> int:
+        # Sample an offset within [0, chunk_size-1], but stay inside the episode and
+        # keep room for t+1 (so new_idx+1 is valid inside the episode).
+        to_list = self.base.episode_data_index["to"].tolist()
+        ep_idx = bisect_right(to_list, idx)
+        ep_start = int(self.base.episode_data_index["from"][ep_idx])
+        ep_end = int(self.base.episode_data_index["to"][ep_idx])  # exclusive
+        max_offset = max(0, min(self.chunk_size - 1, (ep_end - 2) - idx))
+        if max_offset <= 0:
+            return 0
+        return int(torch.randint(low=0, high=max_offset + 1, size=(1,)).item())
+
+    def _build_time_feature(self, time_index: int) -> torch.Tensor:
+        ti = torch.tensor(time_index, dtype=torch.float32)
+        return torch.stack(
+            [
+                torch.cos(2 * torch.tensor(np.pi) * ti / self.chunk_size),
+                torch.sin(2 * torch.tensor(np.pi) * ti / self.chunk_size),
+                ti / self.chunk_size,
+            ],
+            dim=0,
+        )
+
+    def _interpolate_action(self, a_t: torch.Tensor, a_tp1: torch.Tensor) -> torch.Tensor:
+        # a_t, a_tp1: (A,)
+        ratio = torch.linspace(0, 1, self.chunk_size).view(self.chunk_size, 1)
+        return a_t.unsqueeze(0) * (1 - ratio) + a_tp1.unsqueeze(0) * ratio  # (chunk, A)
+
+    def _tokenize_task(self, task: str) -> torch.Tensor:
+        if not task.endswith("\n"):
+            task = f"{task}\n"
+        out = self.tokenizer.__call__(
+            [task],
+            padding="max_length",
+            max_length=48,
+            truncation=True,
+            return_tensors="pt",
+        )
+        return out["input_ids"][0]  # (L,)
+
+    def __getitem__(self, idx: int) -> dict:
+        # Shift index by a sampled offset so that observation corresponds to idx + time_offset
+        time_offset = self._sample_time_offset(idx)
+        new_idx = idx + time_offset
+        # Fetch shifted item for observation/state/actions at time t and t+1
+        s = self.base[new_idx]
+        # Fetch base item (unshifted) to keep vla_actions anchored at original idx
+        s_base = self.base[idx]
+
+        # Build outputs at single time step
+        obs_image = s["observation.images.image"]  # (C,H,W)
+        obs_wrist = s["observation.images.wrist_image"]  # (C,H,W)
+        obs_state = s["observation.state"]  # (S)
+        time_feature = self._build_time_feature(time_offset)  # (3)
+
+        # Action interpolation
+        # With action_delta_indices = [0,1], s["action"] has shape (2, A)
+        a_t = s["action"][0]
+        a_tp1 = s["action"][1]
+        action_interp = self._interpolate_action(a_t, a_tp1)  # (chunk, A)
+        predicted_action_plus_target_action = torch.cat(
+            [
+                s_base["vla_actions"][time_offset],
+                action_interp
+            ],
+            dim=0,
+        )
+        # Language tokens (padded to fixed length)
+        input_ids = self._tokenize_task(s["task"])  # (L)
+
+        return {
+            "observation.images.image": obs_image,
+            "observation.images.wrist_image": obs_wrist,
+            "observation.state": obs_state,
+            "action": predicted_action_plus_target_action,
+            "action_is_pad": torch.zeros((self.chunk_size,), dtype=torch.bool),
+            "task": s_base["task"],
+            "time_feature": time_feature,
+            "input_ids": input_ids,
+        }
 
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
@@ -181,7 +286,8 @@ def train(cfg: TrainPipelineConfig):
     else:
         shuffle = True
         sampler = None
-
+    # Wrap dataset to slice at single time step and interpolate actions in __getitem__
+    dataset = ResidualActTimeSliceDataset(dataset, policy.config.chunk_size, language_tokenizer)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         num_workers=cfg.num_workers,
@@ -207,72 +313,6 @@ def train(cfg: TrainPipelineConfig):
         cfg.batch_size, dataset.num_frames, dataset.num_episodes, train_metrics, initial_step=step
     )
     
-    def convert_raw_batch_to_residualact(batch):
-        batch_size = batch["observation.images.image"].shape[0]
-        
-        residual_chunk_size = policy.config.chunk_size
-        #action_t から action_t_plus_1までを chunk_size 個のアクションに線形補間
-        action_t = batch["action"][:, 0]
-        action_t_plus_1 = batch["action"][:, 1]
-        ratio = torch.linspace(0, 1, residual_chunk_size, device=device).unsqueeze(0).repeat(batch_size, 1)
-        # action_tとaction_t_plus_1を(batch_size, 1, action_dim)に拡張
-        action_t_expanded = action_t.unsqueeze(1)  # (batch_size, 1, action_dim)
-        action_t_plus_1_expanded = action_t_plus_1.unsqueeze(1)  # (batch_size, 1, action_dim)
-        # ratioを(batch_size, residual_chunk_size, 1)に拡張
-        ratio_expanded = ratio.unsqueeze(-1)  # (batch_size, residual_chunk_size, 1)
-        # 線形補間: action_t * (1-ratio) + action_t_plus_1 * ratio
-        action_interpolated = action_t_expanded * (1 - ratio_expanded) + action_t_plus_1_expanded * ratio_expanded
-        
-        # predicted_action_chunk から time_index のアクションを取得
-        predicted_action_time_t = batch["predicted_action"] # (batch_size,action_dim)
-        predicted_action_time_t = predicted_action_time_t.unsqueeze(1)  # (batch_size, 1, action_dim)
-        
-        predicted_action_plus_target_action = torch.cat(
-            [
-                predicted_action_time_t,  # predicted action chunk
-                action_interpolated
-            ],
-            dim=1,
-        ).to(device)
-        
-        # add time feature
-        time_index = batch["elapsed_time"]  # (B,)
-        time_ratio = time_index / residual_chunk_size  # (B,) - normalized time index
-        time_feature = torch.stack([
-            torch.cos(2 *  np.pi * time_index / residual_chunk_size),
-            torch.sin(2 *  np.pi * time_index / residual_chunk_size),
-            time_ratio,  # Add normalized time index as additional feature
-        ], dim=1).to(device)
-        
-        # create language embedding 
-        tasks = batch["task"]
-        if isinstance(tasks, str):
-            tasks = [tasks]
-        tasks = [task if task.endswith("\n") else f"{task}\n" for task in tasks]
-        tokenized_prompt = language_tokenizer.__call__(
-            tasks,
-            padding="longest",
-            padding_side="right",
-            max_length=48,
-            return_tensors="pt",
-        )
-        lang_tokens = tokenized_prompt["input_ids"].to(device=device)
-        #lang_masks = tokenized_prompt["attention_mask"].to(device=device, dtype=torch.bool)
-        lang_emb = vlm.embed_language_tokens(lang_tokens)
-        # Normalize language embeddings
-        lang_emb_dim = lang_emb.shape[-1]
-        lang_emb = lang_emb * math.sqrt(lang_emb_dim)
-        converted_batch = {
-            "observation.images.image": batch["observation.images.image"],
-            "observation.images.wrist_image": batch["observation.images.wrist_image"],
-            "observation.state": batch["observation.state"],
-            "action": predicted_action_plus_target_action,
-            "action_is_pad": torch.zeros((batch_size, residual_chunk_size), dtype=torch.bool, device=device),  # All False (non-padded)
-            "task": batch["task"],
-            "time_feature": time_feature,
-            "language_embedding": lang_emb.to(device),  # (B, lang_emb_dim)
-        }
-        return converted_batch
 
     logging.info("Start offline training on a fixed dataset")
     for _ in range(step, cfg.steps):
@@ -283,9 +323,25 @@ def train(cfg: TrainPipelineConfig):
         for key in batch:
             if isinstance(batch[key], torch.Tensor):
                 batch[key] = batch[key].to(device, non_blocking=device.type == "cuda")
-        batch = convert_raw_batch_to_residualact(batch)
+        if "input_ids" in batch:
+            lang_tokens = batch.pop("input_ids").to(device)
+            lang_emb = vlm.embed_language_tokens(lang_tokens)
+            lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
+            batch["language_embedding"] = lang_emb
+
+            train_tracker, output_dict = update_policy(
+                train_tracker,
+                policy,
+                batch,
+                optimizer,
+                cfg.optimizer.grad_clip_norm,
+                grad_scaler=grad_scaler,
+                lr_scheduler=lr_scheduler,
+                use_amp=cfg.policy.use_amp,
+            )
+        else:
+            raise ValueError("Batch is not a ResidualActTimeSliceDataset")
         
-        ### TODO : add smolVLA inference and batch conversion here
         train_tracker, output_dict = update_policy(
             train_tracker,
             policy,
