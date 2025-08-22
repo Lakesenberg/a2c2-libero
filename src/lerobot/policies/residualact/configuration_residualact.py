@@ -92,7 +92,7 @@ class ResidualACTConfig(PreTrainedConfig):
 
     # Input / output structure.
     n_obs_steps: int = 1
-    chunk_size: int = 50
+    chunk_size: int = 1
     n_action_steps: int = 1
 
     normalization_mapping: dict[str, NormalizationMode] = field(
@@ -180,7 +180,7 @@ class ResidualACTConfig(PreTrainedConfig):
     @property
     def action_delta_indices(self) -> list:
         # need one more index for the action at time t+1 to calculate the interpolated action
-        return [0,1]
+        return [0]
 
     @property
     def reward_delta_indices(self) -> None:
