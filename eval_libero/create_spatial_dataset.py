@@ -57,7 +57,6 @@ for start, end in zip(ep_from, ep_to, strict=True):
                 "observation.images.wrist_image": item["observation.images.wrist_image"].permute(1, 2, 0),
                 "observation.state": item["observation.state"],
                 "action": item["action"],
-                "vla_actions": item["vla_actions"],
             },
             task=item["task"],
         )
