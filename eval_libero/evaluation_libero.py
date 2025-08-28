@@ -36,7 +36,9 @@ def eval() -> None:
     out_base_path = "data/libero"
     
     task_suite_name_list = [ "libero_spatial", "libero_object", "libero_goal", "libero_10"]
-    time_pair = [(0,5),(0,10),(0,30),(0,40),(0,50),(1,10),(3,10),(5,10),(10,10),(1,40),(3,40),(5,40),(10,40)]
+    time_pair = [(0,1),(0,5),(0,10),(0,30),(0,40),(0,50),(1,10),(3,10),(5,10),(10,10),(1,40),(3,40),(5,40),(10,40)]
+    eval_without_residual = False
+    eval_with_residual = True
     time_pair.reverse()  # Reverse to start with the smallest execute_horizon and inference_delay
     seed = 7
     # Set random seed
@@ -56,53 +58,52 @@ def eval() -> None:
     logging.info("=== Evaluating without residual policy ===")
     for task_suite_name in task_suite_name_list:
         video_out_base_path:pathlib.Path = pathlib.Path(os.path.join(out_base_path,f"videos_{task_suite_name}"))
-        json_out_path: str = f"data/libero/results_{task_suite_name}.jsonl"
-        
+        json_out_path :pathlib.Path = pathlib.Path(os.path.join(out_base_path,f"results_{task_suite_name}.jsonl"))
         for inference_delay, execute_horizon in time_pair:
             if execute_horizon < inference_delay:
                 continue
             if execute_horizon+ inference_delay > CHUNK_SIZE:
                 continue
-            # # FIRST: Evaluate without residual policy
-            # logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
-            # video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}"
-            # results = eval_libero(
-            #     base_policy=base_policy,
-            #     residual_policy=residual_policy,
-            #     use_residual_policy=False,
-            #     task_suite_name=task_suite_name,
-            #     num_trials_per_task=num_trials_per_task,
-            #     seed=seed,
-            #     execute_horizon=execute_horizon,
-            #     inference_delay=inference_delay,
-            #     video_out_path=str(video_out_path)
-            # )
-            # with open(json_out_path, "a") as f:
-            #     f.write(f"{results}\n")
-            # logging.info(f"Results without residual policy: {results}")
-
-            # SECOND: Evaluate with residual policy
             logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
-            video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}_residual"
-            results = eval_libero(
-                base_policy=base_policy,
-                residual_policy=residual_policy,
-                use_residual_policy=True,
-                task_suite_name=task_suite_name,
-                num_trials_per_task=num_trials_per_task,
-                seed=seed,
-                execute_horizon=execute_horizon,
-                inference_delay=inference_delay,
-                video_out_path=str(video_out_path)
-            )
-            with open(json_out_path, "a") as f:
-                f.write(f"{results}\n")
-            logging.info(f"Results with residual policy: {results}")
+            
+            if eval_without_residual:
+                # Evaluate without residual policy
+                video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}"
+                results = eval_libero(
+                    base_policy=base_policy,
+                    residual_policy=residual_policy,
+                    use_residual_policy=False,
+                    task_suite_name=task_suite_name,
+                    num_trials_per_task=num_trials_per_task,
+                    seed=seed,
+                    execute_horizon=execute_horizon,
+                    inference_delay=inference_delay,
+                    video_out_path=str(video_out_path)
+                )
+                with open(json_out_path, "a") as f:
+                    f.write(f"{results}\n")
+                logging.info(f"Results without residual policy: {results}")
+
+            if eval_with_residual:
+                # Evaluate with residual policy
+                video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}_residual"
+                results = eval_libero(
+                    base_policy=base_policy,
+                    residual_policy=residual_policy,
+                    use_residual_policy=True,
+                    task_suite_name=task_suite_name,
+                    num_trials_per_task=num_trials_per_task,
+                    seed=seed,
+                    execute_horizon=execute_horizon,
+                    inference_delay=inference_delay,
+                    video_out_path=str(video_out_path)
+                )
+                with open(json_out_path, "a") as f:
+                    f.write(f"{results}\n")
+                logging.info(f"Results with residual policy: {results}")
 
     # Log final results
     logging.info("=== Evaluation completed ===")
-    logging.info(f"Results saved to {json_out_path}")
-    logging.info(f"Videos saved to {video_out_base_path}")
 
 def eval_libero(base_policy: SmolVLAPolicy, 
                 residual_policy:ResidualACTPolicy, 
