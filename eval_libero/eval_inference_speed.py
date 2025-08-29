@@ -1,0 +1,269 @@
+import collections
+import logging
+import math
+import pathlib
+import os
+import time
+import imageio
+import numpy as np
+import torch
+from libero.libero import benchmark, get_libero_path
+from libero.libero.envs import OffScreenRenderEnv
+from tqdm import tqdm
+
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.policies.residualact.modeling_residualact import ResidualACTPolicy
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
+LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
+
+CHUNK_SIZE = 50
+NUM_STEPS_WAIT = 10
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+def eval() -> None:
+    base_policy_path: str = "k1000dai/smolvla_libero_scratch"
+    residual_policy_path: str = "k1000dai/residualact_libero_small_200k"
+    num_trials = 100
+    seed = 7
+    # Set random seed
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    # --- Load Policy ---
+    base_policy = SmolVLAPolicy.from_pretrained(base_policy_path)
+    base_policy.to(DEVICE)
+    base_policy.eval()
+    
+    residual_policy = ResidualACTPolicy.from_pretrained(residual_policy_path)
+    residual_policy.to(DEVICE)
+    residual_policy.eval()
+
+    base_policy_time_list, residual_policy_time_list = eval_inference_speed_using_libero(base_policy, residual_policy, use_residual_policy=True, num_trials=num_trials, seed=seed)
+    print(base_policy_time_list)
+    print(residual_policy_time_list)
+    print(np.mean(base_policy_time_list))
+    print(np.mean(residual_policy_time_list))
+    
+
+def eval_inference_speed_using_libero(base_policy: SmolVLAPolicy, 
+                residual_policy:ResidualACTPolicy, 
+                use_residual_policy: bool = True,
+                num_trials: int = 10, 
+                seed: int = 7,
+                ) -> dict:
+    
+    task_suite_name = "libero_spatial"
+    num_trials_per_task = 50
+    execute_horizon = 1
+    inference_delay = 0
+
+    base_policy_time_list = []
+    residual_policy_time_list = []
+    
+    # --- Load Policy ---
+    benchmark_dict = benchmark.get_benchmark_dict()
+    try:
+        task_suite = benchmark_dict[task_suite_name]()
+    except KeyError:
+        raise ValueError(
+            f"Unknown task suite: {task_suite_name}. "
+            f"Available options are: {list(benchmark_dict.keys())}"
+        )
+    num_tasks_in_suite = task_suite.n_tasks
+    logging.info(f"Task suite: {task_suite_name}")
+
+    if task_suite_name == "libero_spatial":
+        max_steps = 220  # longest training demo has 193 steps
+    elif task_suite_name == "libero_object":
+        max_steps = 280  # longest training demo has 254 steps
+    elif task_suite_name == "libero_goal":
+        max_steps = 300  # longest training demo has 270 steps
+    elif task_suite_name == "libero_10":
+        max_steps = 520  # longest training demo has 505 steps
+    elif task_suite_name == "libero_90":
+        max_steps = 400  # longest training demo has 373 steps
+    else:
+        # Fallback for custom task suites
+        max_steps = 520
+
+    # --- Evaluation Loop ---
+    total_episodes, total_successes = 0, 0
+    for task_id in tqdm(range(num_tasks_in_suite), desc="Tasks"):
+        # Get task
+        task = task_suite.get_task(task_id)
+        # Get default LIBERO initial states
+        initial_states = task_suite.get_task_init_states(task_id)
+        # Initialize LIBERO environment and task description
+        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, seed)
+
+        # Start episodes
+        task_episodes, task_successes = 0, 0
+        
+        for episode_idx in tqdm(
+            range(min(num_trials_per_task, len(initial_states))),
+            desc=f"Task {task_id}: {task.language}",
+            leave=False,
+        ):
+            logging.info(f"\nTask: {task_description}")
+
+            # Reset environment and policy
+            env.reset()
+            base_policy.reset()
+            residual_policy.reset()
+
+            # Set initial states
+            obs = env.set_init_state(initial_states[episode_idx])
+
+            # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
+            # and we need to wait for them to fall
+            for _ in range(NUM_STEPS_WAIT):
+                obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
+
+            # Setup
+            t = 0
+            frames = []
+            done = False
+            action_chunk = None
+            first_execution = True
+            # Add initial frame
+            agentview_image = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+            frames.append(agentview_image)
+            logging.info(f"Starting episode {task_episodes+1}...")
+            
+            while t < max_steps:
+                try:
+                    # Get preprocessed image
+                    # IMPORTANT: rotate 180 degrees to match train preprocessing
+                    wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+                    agentview_image = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+                    frames.append(agentview_image)
+
+                    # Prepare observations dict
+                    state = np.concatenate(
+                        (
+                            obs["robot0_eef_pos"],
+                            _quat2axisangle(obs["robot0_eef_quat"]),
+                            obs["robot0_gripper_qpos"],
+                        )
+                    )
+                    observation = {
+                        "observation.images.image": torch.from_numpy(agentview_image / 255.0)
+                        .permute(2, 0, 1)
+                        .to(torch.float32)
+                        .to(DEVICE).unsqueeze(0),
+                        "observation.images.wrist_image": torch.from_numpy(wrist_img / 255.0)
+                        .permute(2, 0, 1)
+                        .to(torch.float32)
+                        .to(DEVICE).unsqueeze(0),
+                        "observation.state": torch.from_numpy(state).to(torch.float32).to(DEVICE).unsqueeze(0),
+                        "task": task_description,
+                    }
+
+                    if action_chunk is None or len(action_plan) == 0:
+                        start_time = time.perf_counter()
+                        new_action_chunk = base_policy.predict_action_chunk(observation)
+                        end_time = time.perf_counter()
+                        base_policy_time_list.append(end_time - start_time)
+                        new_action_chunk = new_action_chunk.squeeze(0).cpu().numpy()
+
+                        if action_chunk is not None and inference_delay > 0:
+                            # Execute inference_delay actions from previous chunk, then remaining from new chunk
+                            actions_from_previous = action_chunk[:inference_delay]
+                            actions_from_new = new_action_chunk[inference_delay:execute_horizon]
+                            
+                            # Create execution plan for this cycle
+                            execution_plan = list(actions_from_previous) + list(actions_from_new)
+                            logging.debug(f"Using {len(actions_from_previous)} actions from previous chunk, {len(actions_from_new)} from new chunk")
+                            first_execution = False
+                        else:
+                            # First iteration or no delay - use new chunk directly
+                            execution_plan = list(new_action_chunk[:execute_horizon])
+                        action_chunk = np.concatenate([
+                            new_action_chunk[execute_horizon:],
+                            np.zeros((execute_horizon, new_action_chunk.shape[1]))
+                        ])
+                        
+                        # Convert to deque for compatibility with existing execution loop
+                        action_plan = collections.deque(execution_plan)
+                        
+                    if action_plan:
+                        action = action_plan.popleft()
+                    else:
+                        # Fallback - should not happen with correct logic
+                        logging.warning("No actions in plan, using zero action")
+                        action = np.zeros(7)
+
+                    if use_residual_policy:
+                        observation["action"] = torch.from_numpy(action).to(torch.float32).to(DEVICE).unsqueeze(0).unsqueeze(0)  # Add batch and sequence dimensions
+                        time_index = execute_horizon - len(action_plan) - 1
+                        if time_index < inference_delay and not first_execution:
+                            time_index += execute_horizon
+
+                        observation["time_feature"] = torch.tensor([np.cos(2 * np.pi * time_index/CHUNK_SIZE), np.sin(2 * np.pi * time_index/CHUNK_SIZE), time_index/CHUNK_SIZE], dtype=torch.float32).to(DEVICE).unsqueeze(0)
+                        observation["language_embedding"] = base_policy.model.language_embeddings
+                        start_time = time.perf_counter()
+                        updated_action = residual_policy.predict_action_chunk(observation).squeeze(0).cpu().numpy()[0]
+                        end_time = time.perf_counter()
+                        residual_policy_time_list.append(end_time - start_time)
+                        action = updated_action
+                    
+                    obs, _, done, _ = env.step(action)
+                    if done:
+                        task_successes += 1
+                        total_successes += 1
+                        break 
+                    t += 1
+                    if len(base_policy_time_list) == num_trials:
+                        break
+                except Exception as e:
+                    logging.error(f"Caught exception: {e}")
+                    break
+
+            task_episodes += 1
+            total_episodes += 1
+            if len(base_policy_time_list) == num_trials:
+                break
+        if len(residual_policy_time_list) == num_trials:
+            break
+
+    return base_policy_time_list, residual_policy_time_list
+
+
+def _get_libero_env(task, resolution, seed):
+    """Initializes and returns the LIBERO environment, along with the task description."""
+    task_description = task.language
+    task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
+    env_args = {
+        "bddl_file_name": str(task_bddl_file),
+        "camera_heights": resolution,
+        "camera_widths": resolution,
+    }
+    env = OffScreenRenderEnv(**env_args)
+    env.seed(seed)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
+    return env, task_description
+
+
+def _quat2axisangle(quat):
+    """
+    Copied from robosuite:
+    https://github.com/ARISE-Initiative/robosuite/blob/eafb81f54ffc104f905ee48a16bb15f059176ad3/robosuite/utils/transform_utils.py#L490C1-L512C55
+    """
+    # clip quaternion
+    if quat[3] > 1.0:
+        quat[3] = 1.0
+    elif quat[3] < -1.0:
+        quat[3] = -1.0
+
+    den = np.sqrt(1.0 - quat[3] * quat[3])
+    if math.isclose(den, 0.0):
+        # This is (close to) a zero degree rotation, immediately return
+        return np.zeros(3)
+
+    return (quat[:3] * 2.0 * math.acos(quat[3])) / den
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    eval()
