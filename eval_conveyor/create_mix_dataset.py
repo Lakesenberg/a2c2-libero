@@ -76,6 +76,5 @@ new_dataset.push_to_hub(
     tags=["so101"],
     private=False,
     push_videos=True,
-    license="apache-2.0"j,
+    license="apache-2.0",
 )
-    
