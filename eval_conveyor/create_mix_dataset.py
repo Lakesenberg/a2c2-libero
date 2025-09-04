@@ -30,51 +30,42 @@ new_dataset = LeRobotDataset.create(
     features=new_features,
     image_writer_threads=20,
     image_writer_processes=10,
+    batch_encoding_size=8,
 )
 
-episode_index = 0
-for i in tqdm(range(len(base_dataset_fast))):
-    if episode_index != base_dataset_fast[i]["episode_index"]:
-        print("Saving episode", episode_index)
-        new_dataset.save_episode()
-        episode_index = base_dataset_fast[i]["episode_index"]
-    
-    new_dataset.add_frame(
-        {
-            "observation.images.wrist": base_dataset_fast[i]["observation.images.wrist"].permute(1, 2, 0),
-            "observation.images.top": base_dataset_fast[i]["observation.images.top"].permute(1, 2, 0),
-            "observation.state": base_dataset_fast[i]["observation.state"],
-            "action": base_dataset_fast[i]["action"],
-        },
-        task=base_dataset_fast[i]["task"],
-    )
-
-episode_index = 0
-for i in tqdm(range(len(base_dataset_slow))):
-    # save the episode i
-    if episode_index != base_dataset_slow[i]["episode_index"]:
-        print("Saving episode", episode_index)
-        new_dataset.save_episode()
-        episode_index = base_dataset_slow[i]["episode_index"]
-    
-    
-    new_dataset.add_frame(
-        {
-            "observation.images.wrist": base_dataset_slow[i]["observation.images.wrist"].permute(1, 2, 0),
-            "observation.images.top": base_dataset_slow[i]["observation.images.top"].permute(1, 2, 0),
-            "observation.state": base_dataset_slow[i]["observation.state"],
-            "action": base_dataset_slow[i]["action"],
-        },
-        task=base_dataset_slow[i]["task"],
-    )
+def _copy_dataset_by_episode(src: LeRobotDataset, dst: LeRobotDataset, desc: str) -> None:
+    ep_index_map = src.episode_data_index
+    num_eps = src.num_episodes
+    for ep_idx in tqdm(range(num_eps), desc=desc):
+        start = ep_index_map["from"][ep_idx].item()
+        end = ep_index_map["to"][ep_idx].item()
+        for i in range(start, end):
+            item = src[i]
+            wrist = item["observation.images.wrist"].permute(1, 2, 0).contiguous()
+            top = item["observation.images.top"].permute(1, 2, 0).contiguous()
+            dst.add_frame(
+                {
+                    "observation.images.wrist": wrist,
+                    "observation.images.top": top,
+                    "observation.state": item["observation.state"],
+                    "action": item["action"],
+                },
+                task=item["task"],
+            )
+        dst.save_episode()
 
 
-# Save the last episode
-new_dataset.save_episode()
+_copy_dataset_by_episode(base_dataset_fast, new_dataset, desc="Copy fast episodes")
+_copy_dataset_by_episode(base_dataset_slow, new_dataset, desc="Copy slow episodes")
+
+
+# Ensure any pending image writes are flushed
+new_dataset.stop_image_writer()
 print("\nAll episodes processed and saved.")
 new_dataset.push_to_hub(
     tags=["so101"],
     private=False,
     push_videos=True,
     license="apache-2.0",
+    upload_large_folder=True,
 )
