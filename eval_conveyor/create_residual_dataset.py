@@ -25,7 +25,7 @@ base_policy.eval()
 new_features = copy.deepcopy(base_dataset.features)
 new_features["vla_actions"] = { 
                 "dtype": "float32",
-                "shape": (50,7),
+                "shape": (50,6),
                 "names": ["vla_actions"],
             }
  
