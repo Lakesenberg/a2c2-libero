@@ -240,7 +240,7 @@ def record_loop(
         if policy is not None:
             policy_input_frame = {key: observation_frame[key] for key in observation_frame.keys() if not key.startswith("observation.images.eval")}
             action_values = predict_action(
-                observation_frame,
+                policy_input_frame,
                 policy,
                 get_safe_torch_device(policy.config.device),
                 policy.config.use_amp,
