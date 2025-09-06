@@ -184,9 +184,9 @@ class ResidualActTimeSliceDataset(Dataset):
         s_base = self.base[idx]
 
         # Build outputs at single time step
-        obs_image = s["observation.images.image"]  # (C,H,W)
-        obs_wrist = s["observation.images.wrist_image"]  # (C,H,W)
-        obs_state = s["observation.state"]  # (S)
+        # obs_image = s["observation.images.image"]  # (C,H,W)
+        # obs_wrist = s["observation.images.wrist_image"]  # (C,H,W)
+        # obs_state = s["observation.state"]  # (S)
         time_feature = self._build_time_feature(time_offset)  # (3)
 
         # Action interpolation
@@ -205,16 +205,15 @@ class ResidualActTimeSliceDataset(Dataset):
         # Language tokens (padded to fixed length)
         input_ids = self._tokenize_task(s["task"])  # (L)
 
-        return {
-            "observation.images.image": obs_image,
-            "observation.images.wrist_image": obs_wrist,
-            "observation.state": obs_state,
-            "action": predicted_action_plus_target_action,
-            "action_is_pad": torch.zeros((self.chunk_size,), dtype=torch.bool),
-            "task": s_base["task"],
-            "time_feature": time_feature,
-            "input_ids": input_ids,
-        }
+        s["action"] = predicted_action_plus_target_action
+        s["action_is_pad"] = torch.zeros((self.chunk_size,), dtype=torch.bool)
+        s["task"] = s_base["task"]
+        s["time_feature"] = time_feature
+        s["input_ids"] = input_ids
+
+        return s
+
+        
 
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
