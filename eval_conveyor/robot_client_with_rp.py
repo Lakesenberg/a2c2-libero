@@ -57,7 +57,7 @@ from lerobot.scripts.server.helpers import (
     validate_robot_cameras_for_policy,
     visualize_action_queue_size,
 )
-from eval_conveyor.policy_server import TimedAction
+from .policy_server import TimedAction
 from lerobot.transport import (
     services_pb2,  # type: ignore
     services_pb2_grpc,  # type: ignore
