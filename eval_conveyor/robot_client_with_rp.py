@@ -48,6 +48,7 @@ from lerobot.scripts.server.constants import SUPPORTED_ROBOTS
 from lerobot.scripts.server.helpers import (
     Action,
     FPSTracker,
+    TimedData,
     Observation,
     RawObservation,
     RemotePolicyConfig,
@@ -62,12 +63,27 @@ from lerobot.transport import (
     services_pb2,  # type: ignore
     services_pb2_grpc,  # type: ignore
 )
+from dataclasses import asdict, dataclass
 from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
 from lerobot.policies.residualact.modeling_residualact import ResidualACTPolicy
 from transformers import AutoProcessor
 from lerobot.policies.smolvla.smolvlm_with_expert import SmolVLMWithExpertModel
 import math
 from lerobot.datasets.utils import build_dataset_frame
+
+@dataclass
+class TimedAction(TimedData):
+    action: Action
+    chunk_position: int
+
+    def get_action(self):
+        return self.action
+    
+    def set_action(self, action: Action):
+        self.action = action
+    
+    def get_chunk_position(self):
+        return self.chunk_position
 
 class RobotClient:
     prefix = "robot_client"

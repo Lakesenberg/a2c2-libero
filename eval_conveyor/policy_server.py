@@ -34,7 +34,6 @@ from lerobot.scripts.server.helpers import (
     TimedData,
     TimedObservation,
     get_logger,
-    observations_similar,
     raw_observation_to_observation,
 )
 from lerobot.transport import (
@@ -256,14 +255,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.logger.debug(f"Skipping observation #{obs.get_timestep()} - Timestep predicted already!")
             return False
 
-        elif observations_similar(obs, previous_obs, lerobot_features=self.lerobot_features):
-            self.logger.debug(
-                f"Skipping observation #{obs.get_timestep()} - Observation too similar to last obs predicted!"
-            )
-            return False
-
-        else:
-            return True
+        return True
 
     def _enqueue_observation(self, obs: TimedObservation) -> bool:
         """Enqueue an observation if it must go through processing, otherwise skip it.
