@@ -153,8 +153,9 @@ class RobotClient:
             inputs_ids = out["input_ids"][0].to("cuda",non_blocking=True)
             lang_emb = vlm.embed_language_tokens(inputs_ids)
             lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
-            self.language_embedding = lang_emb
+            self.language_embedding = lang_emb.unsqueeze(0)
             del vlm, language_tokenizer
+            torch.cuda.empty_cache()
 
             self.features = {
         "observation.state": {
