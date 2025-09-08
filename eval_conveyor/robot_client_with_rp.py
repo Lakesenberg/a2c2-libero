@@ -70,6 +70,7 @@ from transformers import AutoProcessor
 from lerobot.policies.smolvla.smolvlm_with_expert import SmolVLMWithExpertModel
 import math
 from lerobot.datasets.utils import build_dataset_frame
+import cv2
 
 @dataclass
 class TimedAction(TimedData):
@@ -474,6 +475,8 @@ class RobotClient:
             
             for name in observation:
                 if "image" in name:
+                    # resize to 640x480
+                    observation[name] = cv2.resize(observation[name], (640, 480))
                     observation[name] = observation[name].astype(np.float32) / 255.0
                     observation[name] = np.transpose(observation[name], (2, 0, 1))
                 observation[name] = torch.from_numpy(observation[name])
