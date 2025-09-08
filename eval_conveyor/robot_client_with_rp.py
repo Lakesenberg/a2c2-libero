@@ -71,6 +71,7 @@ from lerobot.policies.smolvla.smolvlm_with_expert import SmolVLMWithExpertModel
 import math
 from lerobot.datasets.utils import build_dataset_frame
 import cv2
+import copy
 
 @dataclass
 class TimedAction(TimedData):
@@ -149,6 +150,11 @@ class RobotClient:
         # Use an event for thread-safe coordination
         self.must_go = threading.Event()
         self.must_go.set()  # Initially set - observations qualify for direct processing
+
+        # __init__
+        self.latest_observation = None
+        self.latest_observation_lock = threading.Lock()
+        self.latest_observation_ready = threading.Event()
 
         self.use_residual_policy = True
         if self.use_residual_policy:
@@ -470,7 +476,9 @@ class RobotClient:
         get_end = time.perf_counter() - get_start
 
         if self.use_residual_policy:
-            observation = self.robot.get_observation()
+            # observation = self.robot.get_observatiofn()
+            with self.latest_observation_lock:
+                observation = copy.deepcopy(self.latest_observation)
             observation = build_dataset_frame(self.features, observation, prefix="observation")
             
             for name in observation:
@@ -520,7 +528,9 @@ class RobotClient:
             # Get serialized observation bytes from the function
             start_time = time.perf_counter()
 
-            raw_observation: RawObservation = self.robot.get_observation()
+            # raw_observation: RawObservation = self.robot.get_observation()
+            with self.latest_observation_lock:
+                raw_observation = copy.deepcopy(self.latest_observation)
             raw_observation["task"] = task
 
             with self.latest_action_lock:
@@ -577,18 +587,30 @@ class RobotClient:
         while self.running:
             control_loop_start = time.perf_counter()
             """Control loop: (1) Performing actions, when available"""
+            # control_loop 内
+            obs = self.robot.get_observation()
+            with self.latest_observation_lock:
+                self.latest_observation = obs
+                self.latest_observation_ready.set()
+            
             if self.actions_available():
                 _performed_action = self.control_loop_action(task,verbose)
-
-            """Control loop: (2) Streaming observations to the remote policy server"""
-            if self._ready_to_send_observation():
-                _captured_observation = self.control_loop_observation(task, verbose)
+            # """Control loop: (2) Streaming observations to the remote policy server"""
+            # if self._ready_to_send_observation():
+            #     _captured_observation = self.control_loop_observation(task, verbose)
 
             self.logger.info(f"Control loop (ms): {(time.perf_counter() - control_loop_start) * 1000:.2f}")
             # Dynamically adjust sleep time to maintain the desired control frequency
             time.sleep(max(0, self.config.environment_dt - (time.perf_counter() - control_loop_start)))
 
         return _captured_observation, _performed_action
+    
+    def send_observation_thread(self, task: str, verbose: bool = False):
+        self.latest_observation_ready.wait()
+        while self.running:
+            if self._ready_to_send_observation():
+                _captured_observation = self.control_loop_observation(task, verbose)
+            time.sleep(max(0, self.config.environment_dt))
 
 
 @draccus.wrap()
@@ -608,6 +630,12 @@ def async_client(cfg: RobotClientConfig):
 
         # Start action receiver thread
         action_receiver_thread.start()
+
+        # Create and start observation sender thread
+        observation_sender_thread = threading.Thread(target=client.send_observation_thread, args=(cfg.task,), daemon=True)
+
+        # Start observation sender thread
+        observation_sender_thread.start()
 
         try:
             # The main thread runs the control loop
