@@ -67,6 +67,7 @@ from lerobot.policies.residualact.modeling_residualact import ResidualACTPolicy
 from transformers import AutoProcessor
 from lerobot.policies.smolvla.smolvlm_with_expert import SmolVLMWithExpertModel
 import math
+from lerobot.datasets.utils import build_dataset_frame
 
 class RobotClient:
     prefix = "robot_client"
@@ -154,6 +155,69 @@ class RobotClient:
             lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
             self.language_embedding = lang_emb
             del vlm, language_tokenizer
+
+            self.features = {
+        "observation.state": {
+            "dtype": "float32",
+            "shape": [
+                6
+            ],
+            "names": [
+                "shoulder_pan.pos",
+                "shoulder_lift.pos",
+                "elbow_flex.pos",
+                "wrist_flex.pos",
+                "wrist_roll.pos",
+                "gripper.pos"
+            ]
+        },
+        "observation.images.wrist": {
+            "dtype": "video",
+            "shape": [
+                480,
+                640,
+                3
+            ],
+            "names": [
+                "height",
+                "width",
+                "channels"
+            ],
+            "info": {
+                "video.height": 480,
+                "video.width": 640,
+                "video.codec": "av1",
+                "video.pix_fmt": "yuv420p",
+                "video.is_depth_map": False,
+                "video.fps": 30,
+                "video.channels": 3,
+                "has_audio": False
+            }
+        },
+        "observation.images.top": {
+            "dtype": "video",
+            "shape": [
+                1080,
+                1920,
+                3
+            ],
+            "names": [
+                "height",
+                "width",
+                "channels"
+            ],
+            "info": {
+                "video.height": 1080,
+                "video.width": 1920,
+                "video.codec": "av1",
+                "video.pix_fmt": "yuv420p",
+                "video.is_depth_map": False,
+                "video.fps": 30,
+                "video.channels": 3,
+                "has_audio": False
+            }
+        },
+    }
     @property
     def running(self):
         return not self.shutdown_event.is_set()
@@ -389,6 +453,7 @@ class RobotClient:
 
         if self.use_residual_policy:
             observation = self.robot.get_observation()
+            observation = build_dataset_frame(self.features, observation, prefix="observation")
             observation["task"] = task
             for name in observation:
                 if "image" in name:
@@ -396,7 +461,7 @@ class RobotClient:
                     observation[name] = np.transpose(observation[name], (1, 2, 0))
                 observation[name] = torch.from_numpy(observation[name])
                 observation[name] = observation[name].unsqueeze(0)
-                observation[name] = observation[name].to("cuda")
+                observation[name] = observation[name].to("cuda",non_blocking=True)
             observation["action"] = timed_action.get_action().to(torch.float32).to("cuda").unsqueeze(0).unsqueeze(0)
             observation["time_feature"] = torch.tensor([np.cos(2 * np.pi * timed_action.get_chunk_position() / self.action_chunk_size), np.sin(2 * np.pi * timed_action.get_chunk_position()/ self.action_chunk_size), timed_action.get_chunk_position()/self.action_chunk_size], dtype=torch.float32).to("cuda").unsqueeze(0)
             observation["language_embedding"] = self.language_embedding
