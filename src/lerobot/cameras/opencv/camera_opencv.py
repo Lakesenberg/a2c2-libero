@@ -200,14 +200,14 @@ class OpenCVCamera(Camera):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"Cannot configure settings for {self} as it is not connected.")
 
-        if self.fps is None:
-            self.fps = self.videocapture.get(cv2.CAP_PROP_FPS)
-        else:
-            self._validate_fps()
+        try:
+            self.videocapture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        except Exception:
+            pass
 
-        default_width = int(round(self.videocapture.get(cv2.CAP_PROP_FRAME_WIDTH)))
+        # 2) 解像度を固定（要求が無ければ現状値）
+        default_width  = int(round(self.videocapture.get(cv2.CAP_PROP_FRAME_WIDTH)))
         default_height = int(round(self.videocapture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-
         if self.width is None or self.height is None:
             self.width, self.height = default_width, default_height
             self.capture_width, self.capture_height = default_width, default_height
@@ -215,7 +215,20 @@ class OpenCVCamera(Camera):
                 self.width, self.height = default_height, default_width
                 self.capture_width, self.capture_height = default_width, default_height
         else:
+            # self.capture_* は __init__ で設定済みの可能性あり。無ければここで同期。
+            if not hasattr(self, "capture_width") or not hasattr(self, "capture_height"):
+                self.capture_width, self.capture_height = self.width, self.height
+                if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
+                    self.capture_width, self.capture_height = self.height, self.width
             self._validate_width_and_height()
+
+        # 3) FPSを最後に設定・検証
+        if self.fps is None:
+            self.fps = float(self.videocapture.get(cv2.CAP_PROP_FPS))
+        else:
+            time.sleep(0.05)
+            self._validate_fps()
+
 
     def _validate_fps(self) -> None:
         """Validates and sets the camera's frames per second (FPS)."""
