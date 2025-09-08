@@ -57,7 +57,7 @@ from lerobot.scripts.server.helpers import (
     validate_robot_cameras_for_policy,
     visualize_action_queue_size,
 )
-from .policy_server import TimedAction
+from policy_server import TimedAction
 from lerobot.transport import (
     services_pb2,  # type: ignore
     services_pb2_grpc,  # type: ignore
@@ -150,7 +150,7 @@ class RobotClient:
                 truncation=True,
                 return_tensors="pt",
             )
-            inputs_ids = out["input_ids"][0]
+            inputs_ids = out["input_ids"][0].to("cuda",non_blocking=True)
             lang_emb = vlm.embed_language_tokens(inputs_ids)
             lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
             self.language_embedding = lang_emb
