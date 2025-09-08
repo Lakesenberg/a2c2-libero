@@ -454,14 +454,15 @@ class RobotClient:
         if self.use_residual_policy:
             observation = self.robot.get_observation()
             observation = build_dataset_frame(self.features, observation, prefix="observation")
-            observation["task"] = task
+            
             for name in observation:
                 if "image" in name:
                     observation[name] = observation[name].astype(np.float32) / 255.0
-                    observation[name] = np.transpose(observation[name], (1, 2, 0))
+                    observation[name] = np.transpose(observation[name], (2, 0, 1))
                 observation[name] = torch.from_numpy(observation[name])
                 observation[name] = observation[name].unsqueeze(0)
                 observation[name] = observation[name].to("cuda",non_blocking=True)
+            observation["task"] = task
             observation["action"] = timed_action.get_action().to(torch.float32).to("cuda").unsqueeze(0).unsqueeze(0)
             observation["time_feature"] = torch.tensor([np.cos(2 * np.pi * timed_action.get_chunk_position() / self.action_chunk_size), np.sin(2 * np.pi * timed_action.get_chunk_position()/ self.action_chunk_size), timed_action.get_chunk_position()/self.action_chunk_size], dtype=torch.float32).to("cuda").unsqueeze(0)
             observation["language_embedding"] = self.language_embedding
