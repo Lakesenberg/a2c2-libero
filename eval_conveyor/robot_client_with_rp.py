@@ -340,7 +340,7 @@ class RobotClient:
 
                 # Update action queue
                 start_time = time.perf_counter()
-                self._aggregate_action_queues(timed_actions, self.config.aggregate_fn)
+                self._aggregate_action_queues(timed_actions, None) # use latest_only aggregate function
                 queue_update_time = time.perf_counter() - start_time
 
                 self.must_go.set()  # after receiving actions, next empty queue triggers must-go processing!
