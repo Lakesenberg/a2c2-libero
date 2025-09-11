@@ -206,7 +206,7 @@ class ResidualActTimeSliceDataset(Dataset):
         input_ids = self._tokenize_task(s["task"])  # (L)
 
         s["action"] = predicted_action_plus_target_action
-        s["action_is_pad"] = torch.zeros((self.chunk_size,), dtype=torch.bool)
+        s["action_is_pad"] = torch.zeros((1,), dtype=torch.bool)
         s["task"] = s_base["task"]
         s["time_feature"] = time_feature
         s["input_ids"] = input_ids
@@ -287,7 +287,8 @@ def train(cfg: TrainPipelineConfig):
         shuffle = True
         sampler = None
     # Wrap dataset to slice at single time step and interpolate actions in __getitem__
-    dataset = ResidualActTimeSliceDataset(dataset, policy.config.chunk_size, language_tokenizer)
+    base_policy_chunk_size = 50
+    dataset = ResidualActTimeSliceDataset(dataset, base_policy_chunk_size, language_tokenizer)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         num_workers=cfg.num_workers,
