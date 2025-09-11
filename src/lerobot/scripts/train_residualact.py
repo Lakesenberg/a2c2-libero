@@ -326,7 +326,8 @@ def train(cfg: TrainPipelineConfig):
                 batch[key] = batch[key].to(device, non_blocking=device.type == "cuda")
         if "input_ids" in batch:
             lang_tokens = batch.pop("input_ids").to(device)
-            lang_emb = vlm.embed_language_tokens(lang_tokens)
+            with torch.no_grad():
+                lang_emb = vlm.embed_language_tokens(lang_tokens)
             lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
             batch["language_embedding"] = lang_emb
         else:
