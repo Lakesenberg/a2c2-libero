@@ -157,11 +157,6 @@ class ResidualActTimeSliceDataset(Dataset):
             dim=0,
         )
 
-    def _interpolate_action(self, a_t: torch.Tensor, a_tp1: torch.Tensor) -> torch.Tensor:
-        # a_t, a_tp1: (A,)
-        ratio = torch.linspace(0, 1, self.chunk_size).view(self.chunk_size, 1)
-        return a_t.unsqueeze(0) * (1 - ratio) + a_tp1.unsqueeze(0) * ratio  # (chunk, A)
-
     def _tokenize_task(self, task: str) -> torch.Tensor:
         if not task.endswith("\n"):
             task = f"{task}\n"
@@ -183,17 +178,9 @@ class ResidualActTimeSliceDataset(Dataset):
         # Fetch base item (unshifted) to keep vla_actions anchored at original idx
         s_base = self.base[idx]
 
-        # Build outputs at single time step
-        # obs_image = s["observation.images.image"]  # (C,H,W)
-        # obs_wrist = s["observation.images.wrist_image"]  # (C,H,W)
-        # obs_state = s["observation.state"]  # (S)
         time_feature = self._build_time_feature(time_offset)  # (3)
 
-        # Action interpolation
-        # With action_delta_indices = [0,1], s["action"] has shape (2, A)
-        a_t = s["action"][0]
-        # a_tp1 = s["action"][1]
-        # action_interp = self._interpolate_action(a_t, a_tp1)  # (chunk, A)
+        a_t = s["action"][0]  
         predicted_action = s_base["vla_actions"][time_offset].unsqueeze(0)
         predicted_action_plus_target_action = torch.cat(
             [
@@ -210,7 +197,6 @@ class ResidualActTimeSliceDataset(Dataset):
         s["task"] = s_base["task"]
         s["time_feature"] = time_feature
         s["input_ids"] = input_ids
-
         return s
 
         
