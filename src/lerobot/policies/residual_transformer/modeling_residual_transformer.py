@@ -120,6 +120,10 @@ class ResidualTransformer(nn.Module):
             self.image_out_dim = backbone.fc.in_features
             self.image_encoder = nn.Sequential(*list(backbone.children())[:-1])  # outputs (B, C, 1, 1)
             self.image_proj = nn.Linear(self.image_out_dim, self.dim_model)
+            if config.freeze_vision_backbone:
+                self.image_encoder.eval()
+                for param in self.image_encoder.parameters():
+                    param.requires_grad = False
         else:
             self.image_encoder = None
 

@@ -19,7 +19,7 @@ from libero.libero.envs import OffScreenRenderEnv
 from tqdm import tqdm
 
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-from lerobot.policies.residualact.modeling_residualact import ResidualACTPolicy
+from lerobot.policies.residual_transformer.modeling_residual_transformer import ResidualTransformerPolicy
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
@@ -31,7 +31,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def eval() -> None:
     base_policy_path: str = "k1000dai/smolvla_libero_scratch"
-    residual_policy_path: str = "k1000dai/residualact_libero_small_200k"
+    residual_policy_path: str | None = "k1000dai/residual_transformer_libero_spatial"
     num_trials_per_task: int = 10 # Number of rollouts per task.
     out_base_path = "data/libero"
     
@@ -50,9 +50,11 @@ def eval() -> None:
     base_policy.to(DEVICE)
     base_policy.eval()
     
-    residual_policy = ResidualACTPolicy.from_pretrained(residual_policy_path)
-    residual_policy.to(DEVICE)
-    residual_policy.eval()
+    residual_policy = None
+    if residual_policy_path and eval_with_residual:
+        residual_policy = ResidualTransformerPolicy.from_pretrained(residual_policy_path)
+        residual_policy.to(DEVICE)
+        residual_policy.eval()
     
 
     logging.info("=== Evaluating without residual policy ===")
@@ -71,7 +73,7 @@ def eval() -> None:
                 video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}"
                 results = eval_libero(
                     base_policy=base_policy,
-                    residual_policy=residual_policy,
+                    residual_policy=None,
                     use_residual_policy=False,
                     task_suite_name=task_suite_name,
                     num_trials_per_task=num_trials_per_task,
@@ -105,8 +107,8 @@ def eval() -> None:
     # Log final results
     logging.info("=== Evaluation completed ===")
 
-def eval_libero(base_policy: SmolVLAPolicy, 
-                residual_policy:ResidualACTPolicy, 
+def eval_libero(base_policy: SmolVLAPolicy,
+                residual_policy: ResidualTransformerPolicy | None,
                 use_residual_policy: bool = True,
                 task_suite_name: str = "libero_spatial", 
                 num_trials_per_task: int = 10, 
@@ -116,6 +118,8 @@ def eval_libero(base_policy: SmolVLAPolicy,
                 video_out_path: str = "data/libero/videos"
                 ) -> dict:
     if use_residual_policy:
+        if residual_policy is None:
+            raise ValueError("Residual policy requested but not provided.")
         print("====  USE RESIDUAL POLICY ====")
     benchmark_dict = benchmark.get_benchmark_dict()
     try:
@@ -169,7 +173,8 @@ def eval_libero(base_policy: SmolVLAPolicy,
             # Reset environment and policy
             env.reset()
             base_policy.reset()
-            residual_policy.reset()
+            if residual_policy is not None:
+                residual_policy.reset()
 
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
@@ -184,7 +189,7 @@ def eval_libero(base_policy: SmolVLAPolicy,
             frames = []
             done = False
             action_chunk = None
-            first_execution = True
+            action_plan = collections.deque()
             # Add initial frame
             agentview_image = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
             frames.append(agentview_image)
@@ -230,8 +235,9 @@ def eval_libero(base_policy: SmolVLAPolicy,
                             
                             # Create execution plan for this cycle
                             execution_plan = list(actions_from_previous) + list(actions_from_new)
-                            logging.debug(f"Using {len(actions_from_previous)} actions from previous chunk, {len(actions_from_new)} from new chunk")
-                            first_execution = False
+                            logging.debug(
+                                f"Using {len(actions_from_previous)} actions from previous chunk, {len(actions_from_new)} from new chunk"
+                            )
                         else:
                             # First iteration or no delay - use new chunk directly
                             execution_plan = list(new_action_chunk[:execute_horizon])
@@ -250,16 +256,26 @@ def eval_libero(base_policy: SmolVLAPolicy,
                         logging.warning("No actions in plan, using zero action")
                         action = np.zeros(7)
 
-                    if use_residual_policy:
-                        observation["action"] = torch.from_numpy(action).to(torch.float32).to(DEVICE).unsqueeze(0).unsqueeze(0)  # Add batch and sequence dimensions
-                        time_index = execute_horizon - len(action_plan) - 1
-                        if time_index < inference_delay and not first_execution:
-                            time_index += execute_horizon
+                    if use_residual_policy and residual_policy is not None:
+                        base_action_tensor = (
+                            torch.from_numpy(action)
+                            .to(torch.float32)
+                            .to(DEVICE)
+                            .unsqueeze(0)
+                        )
+                        observation["action"] = base_action_tensor
 
-                        observation["time_feature"] = torch.tensor([np.cos(2 * np.pi * time_index/CHUNK_SIZE), np.sin(2 * np.pi * time_index/CHUNK_SIZE), time_index/CHUNK_SIZE], dtype=torch.float32).to(DEVICE).unsqueeze(0)
-                        observation["language_embedding"] = base_policy.model.language_embeddings
-                        
-                        updated_action = residual_policy.predict_action_chunk(observation).squeeze(0).cpu().numpy()[0]
+                        lang_emb = getattr(base_policy.model, "language_embeddings", None)
+                        if lang_emb is None:
+                            raise RuntimeError("Base policy does not provide language embeddings for residual correction.")
+                        observation["language_embedding"] = lang_emb.to(DEVICE)
+
+                        updated_action = (
+                            residual_policy.predict_action_chunk(observation)
+                            .squeeze(0)
+                            .cpu()
+                            .numpy()[0]
+                        )
                         action = updated_action
                     
                     obs, _, done, _ = env.step(action)
