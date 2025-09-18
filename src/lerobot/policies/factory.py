@@ -33,6 +33,9 @@ from lerobot.policies.sac.configuration_sac import SACConfig
 from lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.policies.residualact.configuration_residualact import ResidualACTConfig
+from lerobot.policies.residual_transformer.configuration_residual_transformer import (
+    ResidualTransformerConfig,
+)
 from lerobot.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.policies.vqbet.configuration_vqbet import VQBeTConfig
 
@@ -78,6 +81,12 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
     elif name == "residualact":
         from lerobot.policies.residualact.modeling_residualact import ResidualACTPolicy
         return ResidualACTPolicy
+    elif name == "residual_transformer":
+        from lerobot.policies.residual_transformer.modeling_residual_transformer import (
+            ResidualTransformerPolicy,
+        )
+
+        return ResidualTransformerPolicy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -101,6 +110,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return SmolVLAConfig(**kwargs)
     elif policy_type == "residualact":
         return ResidualACTConfig(**kwargs)
+    elif policy_type == "residual_transformer":
+        return ResidualTransformerConfig(**kwargs)
     elif policy_type == "reward_classifier":
         return RewardClassifierConfig(**kwargs)
     else:
