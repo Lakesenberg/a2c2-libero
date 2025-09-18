@@ -55,7 +55,7 @@ class ResidualTransformerConfig(PreTrainedConfig):
     use_language: bool = True
 
     # Optimizer defaults.
-    optimizer_lr: float = 3e-4
+    optimizer_lr: float = 1e-4
     optimizer_weight_decay: float = 1e-4
 
     def __post_init__(self):
