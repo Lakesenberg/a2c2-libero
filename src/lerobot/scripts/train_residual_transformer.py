@@ -173,13 +173,14 @@ class ResidualActTimeSliceDataset(Dataset):
         # Fetch base item (unshifted) to keep vla_actions anchored at original idx
         s_base = self.base[idx]
 
-        a_t = s["action"][0]  
-        predicted_action = s_base["vla_actions"][time_offset].unsqueeze(0)
+        predicted_action = s_base["vla_actions"][time_offset]
+        predicted_action = predicted_action.unsqueeze(0)
+        
+        target_action = s["action"]
+        target_action = target_action.unsqueeze(0)
+
         predicted_action_plus_target_action = torch.cat(
-            [
-                predicted_action,
-                a_t.unsqueeze(0)
-            ],
+            [predicted_action, target_action],
             dim=0,
         )
         # Language tokens (padded to fixed length)
