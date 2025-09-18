@@ -122,6 +122,8 @@ class ResidualActTimeSliceDataset(Dataset):
         self.tokenizer = tokenizer
         # pad id for language tokens
         self.pad_id = getattr(self.tokenizer, "pad_token_id", 0)
+        # Cache tokenized prompts to avoid repeating tokenizer calls during training.
+        self._task_token_cache: dict[str, torch.Tensor] = {}
 
     def __len__(self) -> int:
         return len(self.base)
@@ -148,14 +150,19 @@ class ResidualActTimeSliceDataset(Dataset):
     def _tokenize_task(self, task: str) -> torch.Tensor:
         if not task.endswith("\n"):
             task = f"{task}\n"
-        out = self.tokenizer.__call__(
-            [task],
-            padding="max_length",
-            max_length=48,
-            truncation=True,
-            return_tensors="pt",
-        )
-        return out["input_ids"][0]  # (L,)
+        cached = self._task_token_cache.get(task)
+        if cached is None:
+            out = self.tokenizer.__call__(
+                [task],
+                padding="max_length",
+                padding_side="right",
+                max_length=48,
+                truncation=True,
+                return_tensors="pt",
+            )
+            cached = out["input_ids"][0].clone()  # (L,)
+            self._task_token_cache[task] = cached
+        return cached.clone()
 
     def __getitem__(self, idx: int) -> dict:
         # Shift index by a sampled offset so that observation corresponds to idx + time_offset
@@ -224,6 +231,7 @@ def train(cfg: TrainPipelineConfig):
     
     vlm = SmolVLMWithExpertModel(model_id="HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
     language_tokenizer = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM2-500M-Video-Instruct").tokenizer
+    language_embedding_cache: dict[tuple[int, ...], torch.Tensor] = {}
     
     logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
@@ -296,11 +304,39 @@ def train(cfg: TrainPipelineConfig):
             if isinstance(batch[key], torch.Tensor):
                 batch[key] = batch[key].to(device, non_blocking=device.type == "cuda")
         if "input_ids" in batch:
-            lang_tokens = batch.pop("input_ids").to(device)
-            with torch.no_grad():
-                lang_emb = vlm.embed_language_tokens(lang_tokens)
-            lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
-            batch["language_embedding"] = lang_emb
+            lang_tokens = batch.pop("input_ids")
+            embeddings: list[torch.Tensor | None] = [None] * lang_tokens.shape[0]
+            to_compute: list[torch.Tensor] = []
+            to_compute_keys: list[tuple[int, ...]] = []
+            to_compute_indices: list[int] = []
+
+            for idx in range(lang_tokens.shape[0]):
+                token_row = lang_tokens[idx]
+                key = tuple(int(x) for x in token_row.tolist())
+                cached_emb = language_embedding_cache.get(key)
+                if cached_emb is None:
+                    to_compute.append(token_row)
+                    to_compute_keys.append(key)
+                    to_compute_indices.append(idx)
+                else:
+                    embeddings[idx] = cached_emb
+
+            if to_compute:
+                tokens_tensor = torch.stack(to_compute).to(device, non_blocking=device.type == "cuda")
+                with torch.no_grad():
+                    new_emb = vlm.embed_language_tokens(tokens_tensor)
+                new_emb = new_emb * math.sqrt(new_emb.shape[-1])
+                for out_idx, key, emb in zip(to_compute_indices, to_compute_keys, new_emb):
+                    emb_detached = emb.detach()
+                    language_embedding_cache[key] = emb_detached
+                    embeddings[out_idx] = emb_detached
+
+            if any(e is None for e in embeddings):
+                raise RuntimeError("Missing language embedding after caching step.")
+
+            batch["language_embedding"] = torch.stack(
+                [emb.to(device, non_blocking=device.type == "cuda") for emb in embeddings], dim=0
+            )
         else:
             raise ValueError("Batch is not a ResidualActTimeSliceDataset")
         
