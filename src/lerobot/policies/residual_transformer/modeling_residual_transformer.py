@@ -138,6 +138,7 @@ class ResidualTransformer(nn.Module):
             self.env_state_proj = None
 
         self.action_proj = nn.Linear(self.config.action_feature.shape[0], self.dim_model)
+        self.time_proj = nn.Linear(2, self.dim_model)
         if self.config.use_language:
             self.language_proj = nn.Linear(960, self.dim_model)
         else:
@@ -178,6 +179,13 @@ class ResidualTransformer(nn.Module):
         tokens.append(cls_token)
 
         tokens.append(self.action_proj(base_action).unsqueeze(1))
+
+        time_feature = batch.get("time_feature")
+        if time_feature is None:
+            time_feature = torch.zeros(batch_size, 2, device=device, dtype=dtype)
+        else:
+            time_feature = time_feature.to(device=device, dtype=dtype)
+        tokens.append(self.time_proj(time_feature).unsqueeze(1))
 
         if self.state_proj is not None and "observation.state" in batch:
             tokens.append(self.state_proj(batch["observation.state"].to(dtype)).unsqueeze(1))

@@ -186,10 +186,16 @@ class ResidualActTimeSliceDataset(Dataset):
         # Language tokens (padded to fixed length)
         input_ids = self._tokenize_task(s["task"])  # (L)
 
+        # Encode sampled temporal offset within the chunk using sinusoidal features.
+        denom = max(self.chunk_size - 1, 1)
+        phase = 2 * math.pi * float(time_offset) / denom
+        time_feature = torch.tensor([math.sin(phase), math.cos(phase)], dtype=torch.float32)
+
         s["action"] = predicted_action_plus_target_action
         s["action_is_pad"] = torch.zeros((2,), dtype=torch.bool)
         s["task"] = s_base["task"]
         s["input_ids"] = input_ids
+        s["time_feature"] = time_feature
         return s
 
         
