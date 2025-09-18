@@ -42,7 +42,7 @@ class ResidualTransformerConfig(PreTrainedConfig):
     # Vision backbone settings.
     vision_backbone: str = "resnet18"
     pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1"
-    freeze_vision_backbone: bool = True
+    freeze_vision_backbone: bool = False
 
     # Transformer architecture.
     dim_model: int = 512
