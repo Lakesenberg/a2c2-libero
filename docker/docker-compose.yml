@@ -9,7 +9,7 @@ services:
       context: .
       dockerfile: ${TAG_NAME}/Dockerfile
     image: ${USER}/lerobot:${TAG_NAME}
-    container_name: ${USER}_lerobot_residualact
+    container_name: ${USER}_lerobot_residual_transformer
     network_mode: host
     privileged: true
     shm_size: '50gb'

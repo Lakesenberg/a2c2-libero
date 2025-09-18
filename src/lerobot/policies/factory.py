@@ -32,7 +32,6 @@ from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.sac.configuration_sac import SACConfig
 from lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
-from lerobot.policies.residualact.configuration_residualact import ResidualACTConfig
 from lerobot.policies.residual_transformer.configuration_residual_transformer import (
     ResidualTransformerConfig,
 )
@@ -78,9 +77,6 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 
         return SmolVLAPolicy
-    elif name == "residualact":
-        from lerobot.policies.residualact.modeling_residualact import ResidualACTPolicy
-        return ResidualACTPolicy
     elif name == "residual_transformer":
         from lerobot.policies.residual_transformer.modeling_residual_transformer import (
             ResidualTransformerPolicy,
@@ -108,8 +104,6 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return SACConfig(**kwargs)
     elif policy_type == "smolvla":
         return SmolVLAConfig(**kwargs)
-    elif policy_type == "residualact":
-        return ResidualACTConfig(**kwargs)
     elif policy_type == "residual_transformer":
         return ResidualTransformerConfig(**kwargs)
     elif policy_type == "reward_classifier":

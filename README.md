@@ -34,27 +34,21 @@ python src/lerobot/scripts/train.py  \
 --job_name=libero_smolvla_scratch \
 --wandb.enable=true
 ```
-### Convert Data for Residual ACT
+### Residual Transformer
 ```bash
-python eval_libero/create_residual_dataset.py 
-```
-See the [create_residual_dataset.py](eval_libero/create_residual_dataset.py) for more details. Need to specify the base dataset path, base policy path and new dataset path.
-
-### Residual ACT
-```bash
-python src/lerobot/scripts/train_residualact.py \
---policy.type residualact \
---policy.repo_id residualact_libero_smolvla_singleaction \
+python src/lerobot/scripts/train_residual_transformer.py \
+--policy.type residual_transformer \
 --batch_size 64 \
 --num_workers 16 \
 --steps 400000 \
---dataset.repo_id k1000dai/libero-smolvla \
---output_dir output_residualact_libero_smolvla_singleaction \
---job_name residualact_libero_smolvla_singleaction \
+--dataset.repo_id k1000dai/libero-spatial-smolvla \
+--output_dir output_residual_transformer_spatial \
+--job_name residual_transformer_libero_spatial \
 --wandb.enable True
 ```
+The script internally samples single time steps, caches language tokens, and trains a residual transformer that corrects the base SmolVLA policy. Adjust chunk size or language prompt caching in `src/lerobot/scripts/train_residual_transformer.py` if your dataset layout differs.
 
 ## Evaluation
 ```bash
-MUJOCO_GL=glx python eval_libero/evaluation_residual.py 
+MUJOCO_GL=glx python eval_libero/evaluation_libero.py 
 ```
