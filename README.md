@@ -38,6 +38,7 @@ python src/lerobot/scripts/train.py  \
 ```bash
 python src/lerobot/scripts/train_residual_transformer.py \
 --policy.type residual_transformer \
+--policy.repo_id k1000dai/residual_transformer_libero_spatial \
 --batch_size 64 \
 --num_workers 16 \
 --steps 400000 \
