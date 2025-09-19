@@ -52,9 +52,6 @@ class ResidualTransformerConfig(PreTrainedConfig):
     dim_feedforward: int = 2048
     dropout: float = 0.1
 
-    # Modality toggles.
-    use_language: bool = False
-
     # Optimizer defaults.
     optimizer_lr: float = 1e-5
     optimizer_weight_decay: float = 1e-5

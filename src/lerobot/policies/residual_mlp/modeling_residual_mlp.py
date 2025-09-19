@@ -135,7 +135,7 @@ class ResidualMLP(nn.Module):
 
         self.action_proj = nn.Linear(self.config.action_feature.shape[0], self.dim_model)
         self.time_proj = nn.Linear(2, self.dim_model)
-        self.language_proj = nn.Linear(960, self.dim_model) if self.config.use_language else None
+        self.language_proj = None
         vlm_feature = self.config.input_features.get("vlm_hidden")
         self.vlm_hidden_proj = (
             nn.Linear(vlm_feature.shape[0], self.dim_model) if vlm_feature is not None else None
@@ -151,8 +151,6 @@ class ResidualMLP(nn.Module):
             num_feature_vectors += 1
         if self.image_encoder is not None:
             num_feature_vectors += len(self.config.image_features)
-        if self.language_proj is not None:
-            num_feature_vectors += 1
         if self.vlm_hidden_proj is not None:
             num_feature_vectors += 1
         num_feature_vectors += 1  # task id
@@ -236,18 +234,6 @@ class ResidualMLP(nn.Module):
             self.feature_norm(feat)
             for feat in self._encode_images(batch, batch_size, dtype, device)
         )
-
-        if self.language_proj is not None:
-            language = batch.get("language_embedding")
-            if language is None:
-                language_feat = torch.zeros(batch_size, self.dim_model, device=device, dtype=dtype)
-            else:
-                language = language.to(device=device, dtype=torch.float32)
-                language_feat = self.language_proj(language)
-                if language_feat.ndim == 3:
-                    language_feat = language_feat.mean(dim=1)
-                language_feat = language_feat.to(dtype=dtype)
-            features.append(self.feature_norm(language_feat))
 
         if self.vlm_hidden_proj is not None:
             hidden_vec = batch.get("vlm_hidden")

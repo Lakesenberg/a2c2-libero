@@ -138,10 +138,6 @@ class ResidualTransformer(nn.Module):
 
         self.action_proj = nn.Linear(self.config.action_feature.shape[0], self.dim_model)
         self.time_proj = nn.Linear(2, self.dim_model)
-        if self.config.use_language:
-            self.language_proj = nn.Linear(960, self.dim_model)
-        else:
-            self.language_proj = None
         vlm_feature = self.config.input_features.get("vlm_hidden")
         if vlm_feature is not None:
             self.vlm_hidden_proj = nn.Linear(vlm_feature.shape[0], self.dim_model)
@@ -223,11 +219,6 @@ class ResidualTransformer(nn.Module):
         else:
             task_tensor = torch.zeros(batch_size, 1, device=device, dtype=dtype)
         tokens.append(self.task_proj(task_tensor).unsqueeze(1))
-
-        if self.language_proj is not None and "language_embedding" in batch:
-            language_emb = batch["language_embedding"].to(dtype=torch.float32)
-            language_tokens = self.language_proj(language_emb)
-            tokens.append(language_tokens)
 
         x = torch.cat(tokens, dim=1)
         x = x + self._positional_encoding(x.shape[1], device, dtype=x.dtype)
