@@ -189,7 +189,9 @@ def eval_libero(base_policy: SmolVLAPolicy,
             frames = []
             done = False
             action_chunk = None
+            time_chunk = None
             action_plan = collections.deque()
+            time_plan = collections.deque()
             # Add initial frame
             agentview_image = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
             frames.append(agentview_image)
@@ -227,34 +229,77 @@ def eval_libero(base_policy: SmolVLAPolicy,
                     if action_chunk is None or len(action_plan) == 0:
                         new_action_chunk = base_policy.predict_action_chunk(observation)
                         new_action_chunk = new_action_chunk.squeeze(0).cpu().numpy()
+                        chunk_size = new_action_chunk.shape[0]
+                        new_time_offsets = np.arange(chunk_size, dtype=np.int64)
 
-                        if action_chunk is not None and inference_delay > 0:
-                            # Execute inference_delay actions from previous chunk, then remaining from new chunk
-                            actions_from_previous = action_chunk[:inference_delay]
-                            actions_from_new = new_action_chunk[inference_delay:execute_horizon]
-                            
-                            # Create execution plan for this cycle
-                            execution_plan = list(actions_from_previous) + list(actions_from_new)
-                            logging.debug(
-                                f"Using {len(actions_from_previous)} actions from previous chunk, {len(actions_from_new)} from new chunk"
-                            )
+                        if action_chunk is None:
+                            prev_actions = np.zeros((0, new_action_chunk.shape[1]), dtype=new_action_chunk.dtype)
+                            prev_offsets = np.zeros((0,), dtype=np.int64)
                         else:
-                            # First iteration or no delay - use new chunk directly
-                            execution_plan = list(new_action_chunk[:execute_horizon])
-                        action_chunk = np.concatenate([
-                            new_action_chunk[execute_horizon:],
-                            np.zeros((execute_horizon, new_action_chunk.shape[1]))
-                        ])
-                        
-                        # Convert to deque for compatibility with existing execution loop
-                        action_plan = collections.deque(execution_plan)
-                        
+                            prev_actions = action_chunk
+                            prev_offsets = time_chunk
+
+                        available_prev = min(len(prev_actions), inference_delay)
+                        if available_prev > 0:
+                            actions_from_previous = prev_actions[:available_prev]
+                            offsets_from_previous = prev_offsets[:available_prev]
+                            remaining_prev_actions = prev_actions[available_prev:]
+                            remaining_prev_offsets = prev_offsets[available_prev:]
+                        else:
+                            actions_from_previous = np.zeros((0, new_action_chunk.shape[1]), dtype=new_action_chunk.dtype)
+                            offsets_from_previous = np.zeros((0,), dtype=np.int64)
+                            remaining_prev_actions = prev_actions
+                            remaining_prev_offsets = prev_offsets
+
+                        start_new = min(inference_delay, execute_horizon)
+                        actions_from_new = new_action_chunk[start_new:execute_horizon]
+                        offsets_from_new = new_time_offsets[start_new:execute_horizon]
+
+                        execution_actions = []
+                        execution_offsets = []
+                        for acts, offs in ((actions_from_previous, offsets_from_previous), (actions_from_new, offsets_from_new)):
+                            for act, off in zip(acts, offs, strict=False):
+                                execution_actions.append(act)
+                                execution_offsets.append(off)
+
+                        action_plan = collections.deque(execution_actions)
+                        time_plan = collections.deque(execution_offsets)
+
+                        segments_actions = []
+                        segments_offsets = []
+                        if len(remaining_prev_actions) > 0:
+                            segments_actions.append(remaining_prev_actions)
+                            segments_offsets.append(remaining_prev_offsets)
+
+                        if inference_delay > 0:
+                            delayed_actions = new_action_chunk[:min(inference_delay, chunk_size)]
+                            delayed_offsets = new_time_offsets[:min(inference_delay, chunk_size)]
+                            if len(delayed_actions) > 0:
+                                segments_actions.append(delayed_actions)
+                                segments_offsets.append(delayed_offsets)
+
+                        if execute_horizon < chunk_size:
+                            tail_actions = new_action_chunk[execute_horizon:]
+                            tail_offsets = new_time_offsets[execute_horizon:]
+                            if len(tail_actions) > 0:
+                                segments_actions.append(tail_actions)
+                                segments_offsets.append(tail_offsets)
+
+                        if segments_actions:
+                            action_chunk = np.concatenate(segments_actions, axis=0)
+                            time_chunk = np.concatenate(segments_offsets, axis=0)
+                        else:
+                            action_chunk = np.zeros((0, new_action_chunk.shape[1]), dtype=new_action_chunk.dtype)
+                            time_chunk = np.zeros((0,), dtype=np.int64)
+
                     if action_plan:
                         action = action_plan.popleft()
+                        time_offset = time_plan.popleft() if time_plan else 0
                     else:
                         # Fallback - should not happen with correct logic
                         logging.warning("No actions in plan, using zero action")
                         action = np.zeros(7)
+                        time_offset = 0
 
                     if use_residual_policy and residual_policy is not None:
                         base_action_tensor = (
@@ -264,6 +309,11 @@ def eval_libero(base_policy: SmolVLAPolicy,
                             .unsqueeze(0)
                         )
                         observation["action"] = base_action_tensor
+
+                        denom = max(CHUNK_SIZE - 1, 1)
+                        phase = 2 * math.pi * float(time_offset % CHUNK_SIZE) / denom
+                        time_feature = torch.tensor([[math.sin(phase), math.cos(phase)]], dtype=torch.float32, device=DEVICE)
+                        observation["time_feature"] = time_feature
 
                         lang_emb = getattr(base_policy.model, "language_embeddings", None)
                         if lang_emb is None:
