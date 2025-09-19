@@ -315,11 +315,6 @@ def eval_libero(base_policy: SmolVLAPolicy,
                         time_feature = torch.tensor([[math.sin(phase), math.cos(phase)]], dtype=torch.float32, device=DEVICE)
                         observation["time_feature"] = time_feature
 
-                        lang_emb = getattr(base_policy.model, "language_embeddings", None)
-                        if lang_emb is None:
-                            raise RuntimeError("Base policy does not provide language embeddings for residual correction.")
-                        observation["language_embedding"] = lang_emb.to(DEVICE)
-
                         vlm_hidden = getattr(base_policy, "vlm_hidden", None)
                         if vlm_hidden is None:
                             vlm_hidden = getattr(base_policy.model, "vlm_hidden", None)

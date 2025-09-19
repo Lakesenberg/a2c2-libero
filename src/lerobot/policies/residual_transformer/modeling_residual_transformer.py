@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import math
 from typing import Dict
 
@@ -146,6 +147,7 @@ class ResidualTransformer(nn.Module):
             self.vlm_hidden_proj = nn.Linear(vlm_feature.shape[0], self.dim_model)
         else:
             self.vlm_hidden_proj = None
+        self.task_proj = nn.Linear(1, self.dim_model)
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.dim_model))
         encoder_layer = nn.TransformerEncoderLayer(
@@ -207,6 +209,20 @@ class ResidualTransformer(nn.Module):
         if self.vlm_hidden_proj is not None and "vlm_hidden" in batch:
             hidden_vec = batch["vlm_hidden"].to(device=device, dtype=dtype)
             tokens.append(self.vlm_hidden_proj(hidden_vec).unsqueeze(1))
+
+        tasks = batch.get("task")
+        if tasks is not None:
+            if isinstance(tasks, str):
+                tasks = [tasks] * batch_size
+            task_values = []
+            for task in tasks:
+                digest = hashlib.sha1(task.encode("utf-8")).digest()
+                value = int.from_bytes(digest[:4], "little") / float(0xFFFFFFFF)
+                task_values.append(value)
+            task_tensor = torch.tensor(task_values, device=device, dtype=dtype).unsqueeze(1)
+        else:
+            task_tensor = torch.zeros(batch_size, 1, device=device, dtype=dtype)
+        tokens.append(self.task_proj(task_tensor).unsqueeze(1))
 
         if self.language_proj is not None and "language_embedding" in batch:
             language_emb = batch["language_embedding"].to(dtype=torch.float32)

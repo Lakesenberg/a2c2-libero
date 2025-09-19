@@ -53,7 +53,7 @@ class ResidualTransformerConfig(PreTrainedConfig):
     dropout: float = 0.1
 
     # Modality toggles.
-    use_language: bool = True
+    use_language: bool = False
 
     # Optimizer defaults.
     optimizer_lr: float = 1e-5

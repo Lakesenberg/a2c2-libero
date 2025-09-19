@@ -66,8 +66,6 @@ from lerobot.transport import (
 from dataclasses import asdict, dataclass
 from lerobot.transport.utils import grpc_channel_options, send_bytes_in_chunks
 from lerobot.policies.residualact.modeling_residualact import ResidualACTPolicy
-from transformers import AutoProcessor
-from lerobot.policies.smolvla.smolvlm_with_expert import SmolVLMWithExpertModel
 import math
 from lerobot.datasets.utils import build_dataset_frame
 import cv2
@@ -161,24 +159,6 @@ class RobotClient:
             self.residual_policy = ResidualACTPolicy.from_pretrained("k1000dai/residualact_conveyor_fast")
             self.residual_policy.to("cuda")
             self.residual_policy.eval()
-            vlm = SmolVLMWithExpertModel(model_id="HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
-            language_tokenizer = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM2-500M-Video-Instruct").tokenizer
-            inputs_task_name = self.config.task
-            if not inputs_task_name.endswith("\n"):
-                inputs_task_name = f"{inputs_task_name}\n"
-            out = language_tokenizer.__call__(
-                [inputs_task_name],
-                padding="max_length",
-                max_length=48,
-                truncation=True,
-                return_tensors="pt",
-            )
-            inputs_ids = out["input_ids"][0].to("cuda",non_blocking=True)
-            lang_emb = vlm.embed_language_tokens(inputs_ids)
-            lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
-            self.language_embedding = lang_emb.unsqueeze(0)
-            del vlm, language_tokenizer
-            torch.cuda.empty_cache()
 
             self.features = {
         "observation.state": {
@@ -493,7 +473,6 @@ class RobotClient:
             observation["task"] = task
             observation["action"] = timed_action.get_action().to(torch.float32).to("cuda").unsqueeze(0).unsqueeze(0)
             observation["time_feature"] = torch.tensor([np.cos(2 * np.pi * timed_action.get_chunk_position() / self.action_chunk_size), np.sin(2 * np.pi * timed_action.get_chunk_position()/ self.action_chunk_size), timed_action.get_chunk_position()/self.action_chunk_size], dtype=torch.float32).to("cuda").unsqueeze(0)
-            observation["language_embedding"] = self.language_embedding
             updated_action = self.residual_policy.predict_action_chunk(observation).squeeze(0).cpu().numpy()[0]
             timed_action.set_action(updated_action)
         _performed_action = self.robot.send_action(

@@ -37,8 +37,6 @@ from lerobot.policies.utils import get_device_from_parameters
 from lerobot.scripts.eval import eval_policy
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
-from lerobot.policies.smolvla.smolvlm_with_expert import SmolVLMWithExpertModel
-from transformers import AutoProcessor
 from torch.utils.data import Dataset
 import math
 from bisect import bisect_right
@@ -116,14 +114,9 @@ class ResidualActTimeSliceDataset(Dataset):
     This avoids stacking (B, T, ...) in collate and reduces IPC/memory.
     """
 
-    def __init__(self, base_dataset: Dataset, residual_chunk_size: int, tokenizer):
+    def __init__(self, base_dataset: Dataset, residual_chunk_size: int):
         self.base = base_dataset
         self.chunk_size = residual_chunk_size
-        self.tokenizer = tokenizer
-        # pad id for language tokens
-        self.pad_id = getattr(self.tokenizer, "pad_token_id", 0)
-        # Cache tokenized prompts to avoid repeating tokenizer calls during training.
-        self._task_token_cache: dict[str, torch.Tensor] = {}
 
     def __len__(self) -> int:
         return len(self.base)
@@ -147,23 +140,6 @@ class ResidualActTimeSliceDataset(Dataset):
             return 0
         return int(torch.randint(low=0, high=max_offset + 1, size=(1,)).item())
 
-    def _tokenize_task(self, task: str) -> torch.Tensor:
-        if not task.endswith("\n"):
-            task = f"{task}\n"
-        cached = self._task_token_cache.get(task)
-        if cached is None:
-            out = self.tokenizer.__call__(
-                [task],
-                padding="max_length",
-                padding_side="right",
-                max_length=48,
-                truncation=True,
-                return_tensors="pt",
-            )
-            cached = out["input_ids"][0].clone()  # (L,)
-            self._task_token_cache[task] = cached
-        return cached.clone()
-
     def __getitem__(self, idx: int) -> dict:
         # Shift index by a sampled offset so that observation corresponds to idx + time_offset
         time_offset = self._sample_time_offset(idx)
@@ -183,9 +159,6 @@ class ResidualActTimeSliceDataset(Dataset):
             [predicted_action, target_action],
             dim=0,
         )
-        # Language tokens (padded to fixed length)
-        input_ids = self._tokenize_task(s["task"])  # (L)
-
         # Encode sampled temporal offset within the chunk using sinusoidal features.
         denom = max(self.chunk_size - 1, 1)
         phase = 2 * math.pi * float(time_offset) / denom
@@ -194,7 +167,6 @@ class ResidualActTimeSliceDataset(Dataset):
         s["action"] = stacked_actions
         s["action_is_pad"] = torch.zeros((2,), dtype=torch.bool)
         s["task"] = s_base["task"]
-        s["input_ids"] = input_ids
         s["time_feature"] = time_feature
         if "vlm_hidden" in s_base:
             s["vlm_hidden"] = s_base["vlm_hidden"].clone()
@@ -238,10 +210,6 @@ def train(cfg: TrainPipelineConfig):
         ds_meta=dataset.meta,
     )
     
-    vlm = SmolVLMWithExpertModel(model_id="HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
-    language_tokenizer = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM2-500M-Video-Instruct").tokenizer
-    language_embedding_cache: dict[tuple[int, ...], torch.Tensor] = {}
-    
     logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
     grad_scaler = GradScaler(device.type, enabled=cfg.policy.use_amp)
@@ -276,7 +244,7 @@ def train(cfg: TrainPipelineConfig):
         sampler = None
     # Wrap dataset to slice at single time step and interpolate actions in __getitem__
     base_policy_chunk_size = 50
-    dataset = ResidualActTimeSliceDataset(dataset, base_policy_chunk_size, language_tokenizer)
+    dataset = ResidualActTimeSliceDataset(dataset, base_policy_chunk_size)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         num_workers=cfg.num_workers,
@@ -312,43 +280,6 @@ def train(cfg: TrainPipelineConfig):
         for key in batch:
             if isinstance(batch[key], torch.Tensor):
                 batch[key] = batch[key].to(device, non_blocking=device.type == "cuda")
-        if "input_ids" in batch:
-            lang_tokens = batch.pop("input_ids")
-            embeddings: list[torch.Tensor | None] = [None] * lang_tokens.shape[0]
-            to_compute: list[torch.Tensor] = []
-            to_compute_keys: list[tuple[int, ...]] = []
-            to_compute_indices: list[int] = []
-
-            for idx in range(lang_tokens.shape[0]):
-                token_row = lang_tokens[idx]
-                key = tuple(int(x) for x in token_row.tolist())
-                cached_emb = language_embedding_cache.get(key)
-                if cached_emb is None:
-                    to_compute.append(token_row)
-                    to_compute_keys.append(key)
-                    to_compute_indices.append(idx)
-                else:
-                    embeddings[idx] = cached_emb
-
-            if to_compute:
-                tokens_tensor = torch.stack(to_compute).to(device, non_blocking=device.type == "cuda")
-                with torch.no_grad():
-                    new_emb = vlm.embed_language_tokens(tokens_tensor)
-                new_emb = new_emb * math.sqrt(new_emb.shape[-1])
-                for out_idx, key, emb in zip(to_compute_indices, to_compute_keys, new_emb):
-                    emb_detached = emb.detach()
-                    language_embedding_cache[key] = emb_detached
-                    embeddings[out_idx] = emb_detached
-
-            if any(e is None for e in embeddings):
-                raise RuntimeError("Missing language embedding after caching step.")
-
-            batch["language_embedding"] = torch.stack(
-                [emb.to(device, non_blocking=device.type == "cuda") for emb in embeddings], dim=0
-            )
-        else:
-            raise ValueError("Batch is not a ResidualActTimeSliceDataset")
-        
         train_tracker, output_dict = update_policy(
             train_tracker,
             policy,

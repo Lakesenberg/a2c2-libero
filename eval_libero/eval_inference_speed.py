@@ -202,7 +202,6 @@ def eval_inference_speed_using_libero(base_policy: SmolVLAPolicy,
                             time_index += execute_horizon
 
                         observation["time_feature"] = torch.tensor([np.cos(2 * np.pi * time_index/CHUNK_SIZE), np.sin(2 * np.pi * time_index/CHUNK_SIZE), time_index/CHUNK_SIZE], dtype=torch.float32).to(DEVICE).unsqueeze(0)
-                        observation["language_embedding"] = base_policy.model.language_embeddings
                         if getattr(base_policy, "vlm_hidden", None) is not None:
                             observation["vlm_hidden"] = base_policy.vlm_hidden.to(DEVICE)
                         start_time = time.perf_counter()

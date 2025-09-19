@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 from typing import Dict
 
 import torch
@@ -139,6 +140,7 @@ class ResidualMLP(nn.Module):
         self.vlm_hidden_proj = (
             nn.Linear(vlm_feature.shape[0], self.dim_model) if vlm_feature is not None else None
         )
+        self.task_proj = nn.Linear(1, self.dim_model)
 
         self.feature_norm = nn.LayerNorm(self.dim_model)
 
@@ -153,6 +155,7 @@ class ResidualMLP(nn.Module):
             num_feature_vectors += 1
         if self.vlm_hidden_proj is not None:
             num_feature_vectors += 1
+        num_feature_vectors += 1  # task id
 
         in_dim = self.dim_model * num_feature_vectors
         hidden_dims = list(self.config.hidden_dims)
@@ -253,6 +256,20 @@ class ResidualMLP(nn.Module):
             else:
                 hidden_feat = self.vlm_hidden_proj(hidden_vec.to(device=device, dtype=dtype))
             features.append(self.feature_norm(hidden_feat))
+
+        tasks = batch.get("task")
+        if tasks is None:
+            task_values = [0.0] * batch_size
+        else:
+            if isinstance(tasks, str):
+                tasks = [tasks] * batch_size
+            task_values = [
+                int.from_bytes(hashlib.sha1(task.encode("utf-8")).digest()[:4], "little") / float(0xFFFFFFFF)
+                for task in tasks
+            ]
+        task_tensor = torch.tensor(task_values, device=device, dtype=dtype).unsqueeze(1)
+        task_feat = self.task_proj(task_tensor)
+        features.append(self.feature_norm(task_feat))
 
         mlp_input = torch.cat(features, dim=-1)
         action_norm = self.mlp(mlp_input)
