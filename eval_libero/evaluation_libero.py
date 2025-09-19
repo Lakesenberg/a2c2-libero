@@ -188,6 +188,7 @@ def eval_libero(base_policy: SmolVLAPolicy,
             t = 0
             frames = []
             done = False
+            first_action = True
             action_plan = collections.deque()
             pending_actions = collections.deque()
             # Add initial frame
@@ -245,17 +246,20 @@ def eval_libero(base_policy: SmolVLAPolicy,
                             }
                             for i in range(chunk_size)
                         ]
+                        if first_action:
+                            # For the first action, we want to execute the first `execute_horizon` actions
+                            # We assume that the first `inference_delay` actions are not executed
+                            first_action = False
+           
+                            exec_entries = chunk_entries[:execute_horizon]
+                            action_plan = collections.deque(exec_entries)
+                            pending_actions.extend(chunk_entries[execute_horizon:execute_horizon + inference_delay])
+                            continue
 
-                        available_prev = min(len(pending_actions), inference_delay)
-                        exec_entries = [pending_actions.popleft() for _ in range(available_prev)]
-
-                        start_new = min(inference_delay, execute_horizon)
-                        exec_entries.extend(chunk_entries[start_new:execute_horizon])
-
+                        exec_entries = [pending_actions.popleft() for _ in range(inference_delay)]
+                        exec_entries.extend(chunk_entries[inference_delay :execute_horizon])
                         action_plan = collections.deque(exec_entries)
-
-                    if execute_horizon < chunk_size:
-                        pending_actions.extend(chunk_entries[execute_horizon:])
+                        pending_actions.extend(chunk_entries[execute_horizon:execute_horizon + inference_delay])
 
                     if action_plan:
                         plan_entry = action_plan.popleft()
