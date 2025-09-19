@@ -168,8 +168,7 @@ class ResidualActTimeSliceDataset(Dataset):
         s["action_is_pad"] = torch.zeros((2,), dtype=torch.bool)
         s["task"] = s_base["task"]
         s["time_feature"] = time_feature
-        if "vlm_hidden" in s_base:
-            s["vlm_hidden"] = s_base["vlm_hidden"].clone()
+        s["vlm_hidden"] = s_base["vlm_hidden"].clone()
         return s
 
         
