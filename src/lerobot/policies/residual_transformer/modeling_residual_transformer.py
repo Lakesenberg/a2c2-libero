@@ -31,7 +31,7 @@ from lerobot.policies.residual_transformer.configuration_residual_transformer im
 
 
 class ResidualTransformerPolicy(PreTrainedPolicy):
-    """Residual policy that predicts an additive correction to a base action."""
+    """Refinement policy that predicts the final action given base and context signals."""
 
     config_class = ResidualTransformerConfig
     name = "residual_transformer"
@@ -73,10 +73,9 @@ class ResidualTransformerPolicy(PreTrainedPolicy):
             )
         base_action = actions[:, 0]
         target_action = actions[:, 1]
-        residual_target = target_action - base_action
 
-        residual_pred = self.model(batch, base_action)
-        l1_loss = F.l1_loss(residual_pred, residual_target, reduction="mean")
+        action_pred = self.model(batch, base_action)
+        l1_loss = F.l1_loss(action_pred, target_action, reduction="mean")
 
         return l1_loss, {"l1_loss": l1_loss.item()}
 
@@ -95,8 +94,7 @@ class ResidualTransformerPolicy(PreTrainedPolicy):
         else:
             raise ValueError("Unexpected action tensor shape. Expected (B, action_dim) or (B, >=1, action_dim).")
 
-        residual_pred = self.model(batch, base_action)
-        action_norm = base_action + residual_pred
+        action_norm = self.model(batch, base_action)
         action = self.unnormalize_outputs({ACTION: action_norm.unsqueeze(1)})[ACTION]
         return action
 
@@ -161,7 +159,7 @@ class ResidualTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=self.config.n_encoder_layers)
 
         self.out_norm = nn.LayerNorm(self.dim_model)
-        self.residual_head = nn.Linear(self.dim_model, self.config.action_feature.shape[0])
+        self.action_head = nn.Linear(self.dim_model, self.config.action_feature.shape[0])
 
     def _positional_encoding(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> Tensor:
         position = torch.arange(seq_len, device=device, dtype=dtype).unsqueeze(1)
@@ -219,5 +217,5 @@ class ResidualTransformer(nn.Module):
         x = x + self._positional_encoding(x.shape[1], device, dtype=x.dtype)
         x = self.encoder(x)
         cls_state = self.out_norm(x[:, 0])
-        residual = self.residual_head(cls_state)
-        return residual
+        action_norm = self.action_head(cls_state)
+        return action_norm

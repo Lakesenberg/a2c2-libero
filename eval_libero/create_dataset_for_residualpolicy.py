@@ -6,11 +6,13 @@ import numpy as np
 import os 
 import copy
 
+BATCH_SIZE = 32
+
 
 if os.environ.get("HF_TOKEN") is None:
     raise ValueError("Please set the HF_TOKEN environment variable with your Hugging Face token.")
 
-BASE_REPO_NAME = "k1000dai/libero"
+BASE_REPO_NAME = "k1000dai/libero-spatial"
 UPLOAD_REPO_NAME = "k1000dai/libero-smolvla"
 BASE_POLICY_NAME = "k1000dai/smolvla_libero_scratch"
 
@@ -47,46 +49,69 @@ new_dataset = LeRobotDataset.create(
 )
 
 time_index = 0
-episode_index = 0
+current_episode = None
+buffer: list[dict] = []
 
-for i in range(len(base_dataset)):
-    # save the episode i
-    if episode_index != base_dataset[i]["episode_index"]:
-        print("Saving episode", episode_index)
-        new_dataset.save_episode()
-        episode_index = base_dataset[i]["episode_index"]
+def process_buffer(samples: list[dict]) -> None:
+    global time_index, current_episode
+    if not samples:
+        return
 
-    predicted_action = base_policy.predict_action_chunk(
-        {
-            "observation.images.image": base_dataset[i]["observation.images.image"].unsqueeze(0).to("cuda"),
-            "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"].unsqueeze(0).to("cuda"),
-            "observation.state": base_dataset[i]["observation.state"].unsqueeze(0).to("cuda"),
-            "task": base_dataset[i]["task"]
-        }
-    )
+    device = next(base_policy.parameters()).device
+    observations = {
+        "observation.images.image": torch.stack([s["observation.images.image"] for s in samples]).to(device),
+        "observation.images.wrist_image": torch.stack([s["observation.images.wrist_image"] for s in samples]).to(device),
+        "observation.state": torch.stack([s["observation.state"] for s in samples]).to(device),
+        "task": [s["task"] for s in samples],
+    }
+
+    with torch.no_grad():
+        predicted_actions = base_policy.predict_action_chunk(observations)
+
     vlm_context = getattr(base_policy, "vlm_context", None)
     if vlm_context is None:
         raise RuntimeError("Expected SmolVLA policy to expose `vlm_context` after inference.")
 
-    predicted_action = predicted_action.squeeze(0)  # Remove batch dimension
-    predicted_action = predicted_action.cpu()  # Move to CPU
-    vlm_context = vlm_context.squeeze(0).cpu()
+    predicted_actions = predicted_actions.cpu()
+    vlm_context = vlm_context.cpu()
 
-    new_dataset.add_frame(
-        {
-            "observation.images.image": base_dataset[i]["observation.images.image"].permute(1, 2, 0),
-            "observation.images.wrist_image": base_dataset[i]["observation.images.wrist_image"].permute(1, 2, 0),
-            "observation.state": base_dataset[i]["observation.state"],
-            "action": base_dataset[i]["action"],
-            "vla_actions": predicted_action,
-            "vlm_context": vlm_context,
-        },
-        task=base_dataset[i]["task"],
-    )
-    if i % 1000 == 0:
-        print(f"Processed episode {episode_index}, frame {i} / {len(base_dataset)}, time index {time_index}")
-    time_index += 1
-    
+    for sample, action_chunk, context in zip(samples, predicted_actions, vlm_context, strict=False):
+        episode_idx = sample["episode_index"]
+        if current_episode is None:
+            current_episode = episode_idx
+        elif episode_idx != current_episode:
+            print("Saving episode", current_episode)
+            new_dataset.save_episode()
+            current_episode = episode_idx
+
+        new_dataset.add_frame(
+            {
+                "observation.images.image": sample["observation.images.image"].permute(1, 2, 0),
+                "observation.images.wrist_image": sample["observation.images.wrist_image"].permute(1, 2, 0),
+                "observation.state": sample["observation.state"],
+                "action": sample["action"],
+                "vla_actions": action_chunk,
+                "vlm_context": context,
+            },
+            task=sample["task"],
+        )
+
+        if time_index % 1000 == 0:
+            print(
+                f"Processed episode {episode_idx}, frame {time_index} / {len(base_dataset)}, time index {time_index}"
+            )
+        time_index += 1
+
+
+for idx in range(len(base_dataset)):
+    sample = base_dataset[idx]
+    buffer.append(sample)
+    if len(buffer) >= BATCH_SIZE:
+        process_buffer(buffer)
+        buffer = []
+
+process_buffer(buffer)
+
 # Save the last episode
 new_dataset.save_episode()
 print("\nAll episodes processed and saved.")

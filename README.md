@@ -47,7 +47,7 @@ python src/lerobot/scripts/train_residual_transformer.py \
 --job_name residual_transformer_libero_spatial \
 --wandb.enable True
 ```
-The script internally samples single time steps, caches language tokens, and trains a residual transformer that corrects the base SmolVLA policy. Ensure your residual dataset was generated with the helpers in `eval_libero/create_dataset_for_residualpolicy.py` (or the conveyor variant) so that it now stores both `vla_actions` and the new `vlm_context` feature captured from SmolVLA; older datasets should be regenerated. Adjust chunk size or language prompt caching in `src/lerobot/scripts/train_residual_transformer.py` if your dataset layout differs.
+The script internally samples single time steps, caches language tokens, and trains a lightweight transformer head that predicts the final action conditioned on the base SmolVLA rollout. Ensure your residual dataset was generated with the helpers in `eval_libero/create_dataset_for_residualpolicy.py` (or the conveyor variant) so that it now stores both `vla_actions` and the new `vlm_context` feature captured from SmolVLA; older datasets should be regenerated. Adjust chunk size or language prompt caching in `src/lerobot/scripts/train_residual_transformer.py` if your dataset layout differs.
 
 ### Residual MLP
 ```bash
@@ -62,7 +62,7 @@ python src/lerobot/scripts/train_residual_transformer.py \
 --job_name residual_mlp_libero_spatial \
 --wandb.enable True
 ```
-This uses the same training loop but instantiates the new residual MLP policy (`--policy.type residual_mlp`). Vision encoders remain frozen by default; tune `--policy.dim_model` or `--policy.hidden_dims` as needed for your dataset scale.
+This uses the same training loop but instantiates the MLP head (`--policy.type residual_mlp`) that directly regresses the refined action. Vision encoders remain frozen by default; tune `--policy.dim_model` or `--policy.hidden_dims` as needed for your dataset scale.
 
 ## Evaluation
 ```bash

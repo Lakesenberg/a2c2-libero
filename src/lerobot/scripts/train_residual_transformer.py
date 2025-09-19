@@ -179,7 +179,7 @@ class ResidualActTimeSliceDataset(Dataset):
         target_action = s["action"]
         target_action = target_action.unsqueeze(0)
 
-        predicted_action_plus_target_action = torch.cat(
+        stacked_actions = torch.cat(
             [predicted_action, target_action],
             dim=0,
         )
@@ -191,7 +191,7 @@ class ResidualActTimeSliceDataset(Dataset):
         phase = 2 * math.pi * float(time_offset) / denom
         time_feature = torch.tensor([math.sin(phase), math.cos(phase)], dtype=torch.float32)
 
-        s["action"] = predicted_action_plus_target_action
+        s["action"] = stacked_actions
         s["action_is_pad"] = torch.zeros((2,), dtype=torch.bool)
         s["task"] = s_base["task"]
         s["input_ids"] = input_ids

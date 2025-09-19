@@ -28,7 +28,7 @@ from lerobot.policies.residual_mlp.configuration_residual_mlp import ResidualMLP
 
 
 class ResidualMLPPolicy(PreTrainedPolicy):
-    """Residual policy that predicts an additive correction using a frozen vision backbone and MLP head."""
+    """Policy head that predicts refined actions using a frozen vision backbone and MLP fusion."""
 
     config_class = ResidualMLPConfig
     name = "residual_mlp"
@@ -70,10 +70,8 @@ class ResidualMLPPolicy(PreTrainedPolicy):
             )
         base_action = actions[:, 0]
         target_action = actions[:, 1]
-        residual_target = target_action - base_action
-
-        residual_pred = self.model(batch, base_action)
-        l1_loss = F.l1_loss(residual_pred, residual_target, reduction="mean")
+        action_pred = self.model(batch, base_action)
+        l1_loss = F.l1_loss(action_pred, target_action, reduction="mean")
 
         return l1_loss, {"l1_loss": l1_loss.item()}
 
@@ -92,8 +90,7 @@ class ResidualMLPPolicy(PreTrainedPolicy):
         else:
             raise ValueError("Unexpected action tensor shape. Expected (B, action_dim) or (B, >=1, action_dim).")
 
-        residual_pred = self.model(batch, base_action)
-        action_norm = base_action + residual_pred
+        action_norm = self.model(batch, base_action)
         action = self.unnormalize_outputs({ACTION: action_norm.unsqueeze(1)})[ACTION]
         return action
 
@@ -258,5 +255,5 @@ class ResidualMLP(nn.Module):
             features.append(self.feature_norm(context_feat))
 
         mlp_input = torch.cat(features, dim=-1)
-        residual = self.mlp(mlp_input)
-        return residual
+        action_norm = self.mlp(mlp_input)
+        return action_norm
