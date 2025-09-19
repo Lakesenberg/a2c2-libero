@@ -169,39 +169,54 @@ def eval_inference_speed_using_libero(base_policy: SmolVLAPolicy,
                         new_action_chunk = new_action_chunk.squeeze(0).cpu().numpy()
                         new_time_offsets = np.arange(new_action_chunk.shape[0], dtype=np.int64)
 
+                        vlm_hidden_chunk = getattr(base_policy, "vlm_hidden", None)
+                        if vlm_hidden_chunk is None:
+                            vlm_hidden_chunk = getattr(getattr(base_policy, "model", None), "vlm_hidden", None)
+                        if vlm_hidden_chunk is not None:
+                            vlm_hidden_chunk = vlm_hidden_chunk.detach().cpu().clone()
+
                         chunk_entries = [
                             {
                                 "action": new_action_chunk[i],
                                 "time_offset": int(new_time_offsets[i]),
                                 "chunk": new_action_chunk,
+                                "vlm_hidden": vlm_hidden_chunk,
                             }
                             for i in range(new_action_chunk.shape[0])
                         ]
 
-                        available_prev = min(len(pending_actions), inference_delay)
+                        max_prev_needed = min(inference_delay, execute_horizon)
+                        available_prev = min(len(pending_actions), max_prev_needed)
                         exec_entries = [pending_actions.popleft() for _ in range(available_prev)]
 
-                        start_new = min(inference_delay, execute_horizon)
-                        exec_entries.extend(chunk_entries[start_new:execute_horizon])
+                        remaining_delay = max(inference_delay - available_prev, 0)
+                        remaining_delay = min(remaining_delay, len(chunk_entries))
+                        actions_needed = max(execute_horizon - available_prev, 0)
 
+                        start_exec = remaining_delay
+                        end_exec = min(start_exec + actions_needed, len(chunk_entries))
+
+                        exec_entries.extend(chunk_entries[start_exec:end_exec])
                         action_plan = collections.deque(exec_entries)
 
-                        if start_new > 0:
-                            pending_actions.extend(chunk_entries[:start_new])
-                        if execute_horizon < len(chunk_entries):
-                            pending_actions.extend(chunk_entries[execute_horizon:])
+                        if remaining_delay > 0:
+                            pending_actions.extend(chunk_entries[:remaining_delay])
+                        if end_exec < len(chunk_entries):
+                            pending_actions.extend(chunk_entries[end_exec:])
 
                     if action_plan:
                         plan_entry = action_plan.popleft()
                         action = plan_entry["action"]
                         time_offset = plan_entry["time_offset"]
                         source_chunk = plan_entry["chunk"]
+                        vlm_hidden_entry = plan_entry.get("vlm_hidden")
                     else:
                         # Fallback - should not happen with correct logic
                         logging.warning("No actions in plan, using zero action")
                         action = np.zeros(7, dtype=np.float32)
                         time_offset = 0
                         source_chunk = np.zeros((1, action.shape[0]), dtype=np.float32)
+                        vlm_hidden_entry = None
 
                     if use_residual_policy:
                         base_chunk_np = np.asarray(source_chunk, dtype=np.float32)[:CHUNK_SIZE]
@@ -224,8 +239,10 @@ def eval_inference_speed_using_libero(base_policy: SmolVLAPolicy,
                             torch.tensor([[math.sin(phase), math.cos(phase)]], dtype=torch.float32)
                             .to(DEVICE)
                         )
-                        if getattr(base_policy, "vlm_hidden", None) is not None:
-                            observation["vlm_hidden"] = base_policy.vlm_hidden.to(DEVICE)
+                        if vlm_hidden_entry is not None:
+                            observation["vlm_hidden"] = vlm_hidden_entry.to(DEVICE)
+                        else:
+                            observation.pop("vlm_hidden", None)
                         start_time = time.perf_counter()
                         updated_action = residual_policy.predict_action_chunk(observation).squeeze(0).cpu().numpy()[0]
                         end_time = time.perf_counter()

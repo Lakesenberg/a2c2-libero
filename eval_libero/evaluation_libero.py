@@ -30,12 +30,12 @@ NUM_STEPS_WAIT = 10
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def eval() -> None:
-    base_policy_path: str = "k1000dai/smolvla_libero_scratch"
+    base_policy_path: str = "k1000dai/smolvla_libero_spatial_scratch"
     residual_policy_path: str | None = "k1000dai/residual_transformer_libero_spatial"
     num_trials_per_task: int = 10 # Number of rollouts per task.
-    out_base_path = "data/libero"
+    out_base_path = "result/libero_eval"  # Base path to save videos and results.
     
-    task_suite_name_list = [ "libero_spatial", "libero_object", "libero_goal", "libero_10"]
+    task_suite_name_list = [ "libero_spatial"]
     time_pair = [(0,1),(0,5),(0,10),(0,30),(0,40),(0,50),(1,10),(3,10),(5,10),(10,10),(1,40),(3,40),(5,40),(10,40)]
     eval_without_residual = False
     eval_with_residual = True
