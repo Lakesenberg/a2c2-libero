@@ -349,7 +349,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
         self.language_tokenizer = AutoProcessor.from_pretrained(self.config.vlm_model_name).tokenizer
         self.model = VLAFlowMatching(config)
-        self.vlm_context = None
+        self.vlm_hidden = None
         self.reset()
 
     def reset(self):
@@ -357,9 +357,9 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self._queues = {
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
-        self.vlm_context = None
-        if hasattr(self.model, "vlm_context"):
-            self.model.vlm_context = None
+        self.vlm_hidden = None
+        if hasattr(self.model, "vlm_hidden"):
+            self.model.vlm_hidden = None
 
     # HACK(aliberts, danaaubakirova): we overwrite this classmethod here to fix smolVLA-specific issues
     @classmethod
@@ -396,7 +396,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
         lang_tokens, lang_masks = self.prepare_language(batch)
 
         actions = self.model.sample_actions(images, img_masks, lang_tokens, lang_masks, state, noise=noise)
-        self.vlm_context = getattr(self.model, "vlm_context", None)
+        self.vlm_hidden = getattr(self.model, "vlm_hidden", None)
 
         # Unpad actions
         original_action_dim = self.config.action_feature.shape[0]
@@ -674,9 +674,9 @@ class VLAFlowMatching(nn.Module):
         self.image_end_token = torch.tensor([self.fake_image_token], dtype=torch.long)
         self.prefix_length = self.config.prefix_length
         
-        # keep language embeddings and context features for the residual policy
+        # keep language embeddings and VLM hidden vectors for downstream policies
         self.language_embeddings = None
-        self.vlm_context = None
+        self.vlm_hidden = None
 
     def set_requires_grad(self):
         for params in self.state_proj.parameters():
@@ -887,16 +887,11 @@ class VLAFlowMatching(nn.Module):
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks, state=state
         )
-        # Cache a pooled VLM context embedding for downstream residual policies.
-        pad_mask = prefix_pad_masks.to(dtype=prefix_embs.dtype)
-        valid_counts = pad_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
-        context = (prefix_embs * pad_mask.unsqueeze(-1)).sum(dim=1) / valid_counts
-        self.vlm_context = context
 
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-        # Compute image and language key value cache
-        _, past_key_values = self.vlm_with_expert.forward(
+        # Compute image and language key value cache, and expose final hidden states.
+        prefix_outputs, past_key_values = self.vlm_with_expert.forward(
             attention_mask=prefix_att_2d_masks,
             position_ids=prefix_position_ids,
             past_key_values=None,
@@ -904,6 +899,19 @@ class VLAFlowMatching(nn.Module):
             use_cache=self.config.use_cache,
             fill_kv_cache=True,
         )
+        hidden_states = None
+        if isinstance(prefix_outputs, (list, tuple)):
+            for out in prefix_outputs:
+                if out is not None:
+                    hidden_states = out
+                    break
+        else:
+            hidden_states = prefix_outputs
+
+        if hidden_states is not None:
+            self.vlm_hidden = hidden_states[:, 0].contiguous().detach().to(dtype=torch.float32)
+        else:
+            self.vlm_hidden = None
         dt = -1.0 / self.config.num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
 

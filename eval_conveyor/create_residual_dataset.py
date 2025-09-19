@@ -25,17 +25,36 @@ base_policy = SmolVLAPolicy.from_pretrained(BASE_POLICY_NAME)
 base_policy.to("cuda")
 base_policy.eval()
 
+device = next(base_policy.parameters()).device
+
+first_sample = base_dataset[0]
+with torch.no_grad():
+    initial_observation = {
+        "observation.images.wrist": first_sample["observation.images.wrist"].unsqueeze(0).to(device),
+        "observation.images.top": first_sample["observation.images.top"].unsqueeze(0).to(device),
+        "observation.state": first_sample["observation.state"].unsqueeze(0).to(device),
+        "task": first_sample["task"],
+    }
+    base_policy.predict_action_chunk(initial_observation)
+
+initial_vlm_hidden = getattr(base_policy, "vlm_hidden", None)
+if initial_vlm_hidden is None:
+    raise RuntimeError("SmolVLA policy did not return `vlm_hidden`. Ensure the model exposes hidden states.")
+
+hidden_dim = int(initial_vlm_hidden.squeeze(0).shape[-1])
+
+base_policy.reset()
+
 new_features = copy.deepcopy(base_dataset.features)
 new_features["vla_actions"] = { 
                 "dtype": "float32",
                 "shape": (50,6),
                 "names": ["vla_actions"],
             }
-context_dim = base_policy.model.vlm_with_expert.config.text_config.hidden_size
-new_features["vlm_context"] = {
+new_features["vlm_hidden"] = {
                 "dtype": "float32",
-                "shape": (context_dim,),
-                "names": ["vlm_context"],
+                "shape": (hidden_dim,),
+                "names": ["vlm_hidden"],
             }
  
 print(f"Base dataset features: {base_dataset.features}")
@@ -58,7 +77,6 @@ def process_buffer(samples: list[dict]) -> None:
     if not samples:
         return
 
-    device = next(base_policy.parameters()).device
     observations = {
         "observation.images.wrist": torch.stack([s["observation.images.wrist"] for s in samples]).to(device),
         "observation.images.top": torch.stack([s["observation.images.top"] for s in samples]).to(device),
@@ -69,14 +87,14 @@ def process_buffer(samples: list[dict]) -> None:
     with torch.no_grad():
         predicted_actions = base_policy.predict_action_chunk(observations)
 
-    vlm_context = getattr(base_policy, "vlm_context", None)
-    if vlm_context is None:
-        raise RuntimeError("Expected SmolVLA policy to expose `vlm_context` after inference.")
+    vlm_hidden = getattr(base_policy, "vlm_hidden", None)
+    if vlm_hidden is None:
+        raise RuntimeError("Expected SmolVLA policy to expose `vlm_hidden` after inference.")
 
     predicted_actions = predicted_actions.cpu()
-    vlm_context = vlm_context.cpu()
+    vlm_hidden = vlm_hidden.cpu()
 
-    for sample, action_chunk, context in zip(samples, predicted_actions, vlm_context, strict=False):
+    for sample, action_chunk, hidden_vec in zip(samples, predicted_actions, vlm_hidden, strict=False):
         episode_idx = sample["episode_index"]
         if current_episode is None:
             current_episode = episode_idx
@@ -92,7 +110,7 @@ def process_buffer(samples: list[dict]) -> None:
                 "observation.state": sample["observation.state"],
                 "action": sample["action"],
                 "vla_actions": action_chunk,
-                "vlm_context": context,
+                "vlm_hidden": hidden_vec.clone(),
             },
             task=sample["task"],
         )

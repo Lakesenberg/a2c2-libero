@@ -141,11 +141,11 @@ class ResidualTransformer(nn.Module):
             self.language_proj = nn.Linear(960, self.dim_model)
         else:
             self.language_proj = None
-        vlm_feature = self.config.input_features.get("vlm_context")
+        vlm_feature = self.config.input_features.get("vlm_hidden")
         if vlm_feature is not None:
-            self.vlm_context_proj = nn.Linear(vlm_feature.shape[0], self.dim_model)
+            self.vlm_hidden_proj = nn.Linear(vlm_feature.shape[0], self.dim_model)
         else:
-            self.vlm_context_proj = None
+            self.vlm_hidden_proj = None
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.dim_model))
         encoder_layer = nn.TransformerEncoderLayer(
@@ -204,9 +204,9 @@ class ResidualTransformer(nn.Module):
             if image_tokens:
                 tokens.append(torch.cat(image_tokens, dim=1))
 
-        if self.vlm_context_proj is not None and "vlm_context" in batch:
-            context = batch["vlm_context"].to(device=device, dtype=dtype)
-            tokens.append(self.vlm_context_proj(context).unsqueeze(1))
+        if self.vlm_hidden_proj is not None and "vlm_hidden" in batch:
+            hidden_vec = batch["vlm_hidden"].to(device=device, dtype=dtype)
+            tokens.append(self.vlm_hidden_proj(hidden_vec).unsqueeze(1))
 
         if self.language_proj is not None and "language_embedding" in batch:
             language_emb = batch["language_embedding"].to(dtype=torch.float32)
