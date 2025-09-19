@@ -32,9 +32,8 @@ from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.sac.configuration_sac import SACConfig
 from lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
-from lerobot.policies.residual_transformer.configuration_residual_transformer import (
-    ResidualTransformerConfig,
-)
+from lerobot.policies.residual_mlp.configuration_residual_mlp import ResidualMLPConfig
+from lerobot.policies.residual_transformer.configuration_residual_transformer import ResidualTransformerConfig
 from lerobot.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.policies.vqbet.configuration_vqbet import VQBeTConfig
 
@@ -83,6 +82,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         )
 
         return ResidualTransformerPolicy
+    elif name == "residual_mlp":
+        from lerobot.policies.residual_mlp.modeling_residual_mlp import ResidualMLPPolicy
+
+        return ResidualMLPPolicy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -106,6 +109,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return SmolVLAConfig(**kwargs)
     elif policy_type == "residual_transformer":
         return ResidualTransformerConfig(**kwargs)
+    elif policy_type == "residual_mlp":
+        return ResidualMLPConfig(**kwargs)
     elif policy_type == "reward_classifier":
         return RewardClassifierConfig(**kwargs)
     else:
