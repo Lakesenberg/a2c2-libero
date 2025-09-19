@@ -224,9 +224,17 @@ class TimedData:
 @dataclass
 class TimedAction(TimedData):
     action: Action
+    chunk_position: int = 0
+    base_chunk: ActionChunk | None = None
 
     def get_action(self):
         return self.action
+
+    def get_chunk_position(self) -> int:
+        return self.chunk_position
+
+    def get_base_chunk(self) -> ActionChunk | None:
+        return self.base_chunk
 
 
 @dataclass

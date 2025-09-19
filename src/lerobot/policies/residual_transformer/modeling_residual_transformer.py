@@ -61,6 +61,32 @@ class ResidualTransformerPolicy(PreTrainedPolicy):
     def _prepare_batch(self, batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
         batch = self.normalize_inputs(batch)
         batch = self.normalize_targets(batch)
+        batch = self._normalize_action_chunk(batch)
+        return batch
+
+    def _normalize_action_chunk(self, batch: Dict[str, Tensor]) -> Dict[str, Tensor]:
+        chunk = batch.get("base_action_chunk")
+        if chunk is None:
+            return batch
+
+        buffer_name = "buffer_" + ACTION.replace(".", "_")
+        action_buffer = getattr(self.normalize_targets, buffer_name, None)
+        if action_buffer is None:
+            return batch
+
+        mean = action_buffer.get("mean")
+        std = action_buffer.get("std")
+        if mean is None or std is None:
+            return batch
+
+        # Broadcast normalization statistics over (batch, chunk_length, action_dim)
+        target_dtype = chunk.dtype
+        target_device = chunk.device
+        mean = mean.to(device=target_device, dtype=target_dtype)
+        std = std.to(device=target_device, dtype=target_dtype)
+
+        view_shape = (1,) * (chunk.ndim - mean.ndim) + mean.shape
+        batch["base_action_chunk"] = (chunk - mean.view(view_shape)) / (std.view(view_shape) + 1e-8)
         return batch
 
     def forward(self, batch: Dict[str, Tensor]) -> tuple[Tensor, dict]:
@@ -75,7 +101,7 @@ class ResidualTransformerPolicy(PreTrainedPolicy):
         base_action = actions[:, 0]
         target_action = actions[:, 1]
 
-        action_pred = self.model(batch, base_action)
+        action_pred = self.model(batch, base_action, batch.get("base_action_chunk"))
         l1_loss = F.l1_loss(action_pred, target_action, reduction="mean")
 
         return l1_loss, {"l1_loss": l1_loss.item()}
@@ -95,7 +121,7 @@ class ResidualTransformerPolicy(PreTrainedPolicy):
         else:
             raise ValueError("Unexpected action tensor shape. Expected (B, action_dim) or (B, >=1, action_dim).")
 
-        action_norm = self.model(batch, base_action)
+        action_norm = self.model(batch, base_action, batch.get("base_action_chunk"))
         action = self.unnormalize_outputs({ACTION: action_norm.unsqueeze(1)})[ACTION]
         return action
 
@@ -145,7 +171,6 @@ class ResidualTransformer(nn.Module):
             self.vlm_hidden_proj = None
         self.task_proj = nn.Linear(1, self.dim_model)
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.dim_model))
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.dim_model,
             nhead=self.config.n_heads,
@@ -170,16 +195,28 @@ class ResidualTransformer(nn.Module):
         pe[:, 1::2] = torch.cos(position * div_term)
         return pe.unsqueeze(0)
 
-    def forward(self, batch: Dict[str, Tensor], base_action: Tensor) -> Tensor:
+    def forward(
+        self,
+        batch: Dict[str, Tensor],
+        base_action: Tensor,
+        base_action_chunk: Tensor | None = None,
+    ) -> Tensor:
         tokens = []
         batch_size = base_action.shape[0]
         dtype = base_action.dtype
         device = base_action.device
 
-        cls_token = self.cls_token.expand(batch_size, -1, -1)
-        tokens.append(cls_token)
+        base_action_token = self.action_proj(base_action).unsqueeze(1)
+        tokens.append(base_action_token)
 
-        tokens.append(self.action_proj(base_action).unsqueeze(1))
+        chunk_tokens = None
+        if base_action_chunk is None:
+            base_action_chunk = batch.get("base_action_chunk")
+        if base_action_chunk is not None:
+            chunk = base_action_chunk.to(device=device, dtype=dtype)
+            if chunk.ndim == 2:
+                chunk = chunk.unsqueeze(1)
+            chunk_tokens = self.action_proj(chunk)
 
         time_feature = batch.get("time_feature")
         if time_feature is None:
@@ -187,6 +224,9 @@ class ResidualTransformer(nn.Module):
         else:
             time_feature = time_feature.to(device=device, dtype=dtype)
         tokens.append(self.time_proj(time_feature).unsqueeze(1))
+
+        if chunk_tokens is not None:
+            tokens.append(chunk_tokens)
 
         if self.state_proj is not None and "observation.state" in batch:
             tokens.append(self.state_proj(batch["observation.state"].to(dtype)).unsqueeze(1))

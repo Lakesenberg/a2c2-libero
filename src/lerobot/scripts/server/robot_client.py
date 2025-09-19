@@ -267,6 +267,8 @@ class RobotClient:
                     action=aggregate_fn(
                         current_action_queue[new_action.get_timestep()], new_action.get_action()
                     ),
+                    chunk_position=new_action.get_chunk_position(),
+                    base_chunk=new_action.get_base_chunk(),
                 )
             )
 

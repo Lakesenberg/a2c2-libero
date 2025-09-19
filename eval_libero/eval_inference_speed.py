@@ -126,6 +126,7 @@ def eval_inference_speed_using_libero(base_policy: SmolVLAPolicy,
             frames = []
             done = False
             action_chunk = None
+            action_plan = collections.deque()
             first_execution = True
             # Add initial frame
             agentview_image = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
@@ -196,12 +197,37 @@ def eval_inference_speed_using_libero(base_policy: SmolVLAPolicy,
                         action = np.zeros(7)
 
                     if use_residual_policy:
-                        observation["action"] = torch.from_numpy(action).to(torch.float32).to(DEVICE).unsqueeze(0).unsqueeze(0)  # Add batch and sequence dimensions
+                        plan_actions = [action]
+                        if len(action_plan) > 0:
+                            plan_actions.extend(list(action_plan))
+                        if action_chunk is not None and len(action_chunk) > 0:
+                            plan_actions.extend(list(action_chunk))
+
+                        plan_actions = plan_actions[:CHUNK_SIZE]
+                        base_chunk_np = np.asarray(plan_actions, dtype=np.float32)
+
+                        observation["action"] = (
+                            torch.from_numpy(action)
+                            .to(torch.float32)
+                            .to(DEVICE)
+                            .unsqueeze(0)
+                            .unsqueeze(0)
+                        )  # Add batch and sequence dimensions
+                        observation["base_action_chunk"] = (
+                            torch.from_numpy(base_chunk_np)
+                            .to(torch.float32)
+                            .to(DEVICE)
+                            .unsqueeze(0)
+                        )
                         time_index = execute_horizon - len(action_plan) - 1
                         if time_index < inference_delay and not first_execution:
                             time_index += execute_horizon
 
-                        observation["time_feature"] = torch.tensor([np.cos(2 * np.pi * time_index/CHUNK_SIZE), np.sin(2 * np.pi * time_index/CHUNK_SIZE), time_index/CHUNK_SIZE], dtype=torch.float32).to(DEVICE).unsqueeze(0)
+                        phase = 2 * math.pi * float(time_index % CHUNK_SIZE) / max(CHUNK_SIZE - 1, 1)
+                        observation["time_feature"] = (
+                            torch.tensor([[math.sin(phase), math.cos(phase)]], dtype=torch.float32)
+                            .to(DEVICE)
+                        )
                         if getattr(base_policy, "vlm_hidden", None) is not None:
                             observation["vlm_hidden"] = base_policy.vlm_hidden.to(DEVICE)
                         start_time = time.perf_counter()

@@ -302,6 +302,15 @@ def eval_libero(base_policy: SmolVLAPolicy,
                         time_offset = 0
 
                     if use_residual_policy and residual_policy is not None:
+                        plan_actions = [action]
+                        if len(action_plan) > 0:
+                            plan_actions.extend(list(action_plan))
+                        if action_chunk is not None and len(action_chunk) > 0:
+                            plan_actions.extend(list(action_chunk))
+
+                        plan_actions = plan_actions[:CHUNK_SIZE]
+                        base_chunk_np = np.asarray(plan_actions, dtype=np.float32)
+
                         base_action_tensor = (
                             torch.from_numpy(action)
                             .to(torch.float32)
@@ -309,6 +318,12 @@ def eval_libero(base_policy: SmolVLAPolicy,
                             .unsqueeze(0)
                         )
                         observation["action"] = base_action_tensor
+                        observation["base_action_chunk"] = (
+                            torch.from_numpy(base_chunk_np)
+                            .to(torch.float32)
+                            .to(DEVICE)
+                            .unsqueeze(0)
+                        )
 
                         denom = max(CHUNK_SIZE - 1, 1)
                         phase = 2 * math.pi * float(time_offset % CHUNK_SIZE) / denom

@@ -75,6 +75,7 @@ import copy
 class TimedAction(TimedData):
     action: Action
     chunk_position: int
+    base_chunk: torch.Tensor | None = None
 
     def get_action(self):
         return self.action
@@ -84,6 +85,9 @@ class TimedAction(TimedData):
     
     def get_chunk_position(self):
         return self.chunk_position
+
+    def get_base_chunk(self) -> torch.Tensor | None:
+        return self.base_chunk
 
 class RobotClient:
     prefix = "robot_client"
@@ -347,6 +351,7 @@ class RobotClient:
                         current_action_queue[new_action.get_timestep()], new_action.get_action()
                     ),
                     chunk_position=new_action.get_chunk_position(),
+                    base_chunk=new_action.get_base_chunk(),
                 )
             )
 
@@ -471,8 +476,33 @@ class RobotClient:
                 observation[name] = observation[name].unsqueeze(0)
                 observation[name] = observation[name].to("cuda",non_blocking=True)
             observation["task"] = task
-            observation["action"] = timed_action.get_action().to(torch.float32).to("cuda").unsqueeze(0).unsqueeze(0)
-            observation["time_feature"] = torch.tensor([np.cos(2 * np.pi * timed_action.get_chunk_position() / self.action_chunk_size), np.sin(2 * np.pi * timed_action.get_chunk_position()/ self.action_chunk_size), timed_action.get_chunk_position()/self.action_chunk_size], dtype=torch.float32).to("cuda").unsqueeze(0)
+            base_chunk = timed_action.get_base_chunk()
+            if base_chunk is None:
+                queued_actions = [entry.get_action() for entry in list(self.action_queue.queue)]
+                plan_actions = [timed_action.get_action(), *queued_actions]
+                if plan_actions:
+                    base_chunk = torch.stack(plan_actions)
+                else:
+                    base_chunk = timed_action.get_action().unsqueeze(0)
+
+            if self.action_chunk_size > 0:
+                base_chunk = base_chunk[: self.action_chunk_size]
+
+            observation["action"] = (
+                timed_action.get_action()
+                .to(torch.float32)
+                .to("cuda")
+                .unsqueeze(0)
+                .unsqueeze(0)
+            )
+            observation["base_action_chunk"] = base_chunk.to(torch.float32).to("cuda").unsqueeze(0)
+
+            denom = max(self.action_chunk_size - 1, 1)
+            phase = 2 * math.pi * float(timed_action.get_chunk_position() % max(self.action_chunk_size, 1)) / denom
+            observation["time_feature"] = (
+                torch.tensor([[math.sin(phase), math.cos(phase)]], dtype=torch.float32)
+                .to("cuda")
+            )
             updated_action = self.residual_policy.predict_action_chunk(observation).squeeze(0).cpu().numpy()[0]
             timed_action.set_action(updated_action)
         _performed_action = self.robot.send_action(

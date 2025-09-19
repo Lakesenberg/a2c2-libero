@@ -47,15 +47,19 @@ from lerobot.transport.utils import receive_bytes_in_chunks
 class TimedAction(TimedData):
     action: Action
     chunk_position: int
+    base_chunk: torch.Tensor | None = None
 
     def get_action(self):
         return self.action
-    
+
     def set_action(self, action: Action):
         self.action = action
-    
+
     def get_chunk_position(self):
         return self.chunk_position
+
+    def get_base_chunk(self) -> torch.Tensor | None:
+        return self.base_chunk
 
 class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
     prefix = "policy_server"
@@ -284,8 +288,15 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         return False
 
     def _time_action_chunk(self, t_0: float, action_chunk: list[torch.Tensor], i_0: int) -> list[TimedAction]:
+        chunk_tensor = torch.stack(action_chunk)
         return [
-            TimedAction(timestamp=t_0 + i * self.config.environment_dt, timestep=i_0 + i, action=action,chunk_position=i)
+            TimedAction(
+                timestamp=t_0 + i * self.config.environment_dt,
+                timestep=i_0 + i,
+                action=action,
+                chunk_position=i,
+                base_chunk=chunk_tensor,
+            )
             for i, action in enumerate(action_chunk)
         ]
 

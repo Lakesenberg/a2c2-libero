@@ -151,7 +151,9 @@ class ResidualActTimeSliceDataset(Dataset):
 
         predicted_action = s_base["vla_actions"][time_offset]
         predicted_action = predicted_action.unsqueeze(0)
-        
+
+        base_action_chunk = s_base["vla_actions"].clone()
+
         target_action = s["action"]
         target_action = target_action.unsqueeze(0)
 
@@ -169,6 +171,7 @@ class ResidualActTimeSliceDataset(Dataset):
         s["task"] = s_base["task"]
         s["time_feature"] = time_feature
         s["vlm_hidden"] = s_base["vlm_hidden"].clone()
+        s["base_action_chunk"] = base_action_chunk
         return s
 
         

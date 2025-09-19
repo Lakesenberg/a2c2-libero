@@ -48,7 +48,7 @@ class ResidualTransformerConfig(PreTrainedConfig):
     # Transformer architecture.
     dim_model: int = 512
     n_heads: int = 8
-    n_encoder_layers: int = 10
+    n_encoder_layers: int = 6
     dim_feedforward: int = 2048
     dropout: float = 0.1
 

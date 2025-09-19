@@ -295,8 +295,15 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         with the first action corresponding to t_0 and the rest corresponding to
         t_0 + i*environment_dt for i in range(len(action_chunk))
         """
+        chunk_tensor = torch.stack(action_chunk)
         return [
-            TimedAction(timestamp=t_0 + i * self.config.environment_dt, timestep=i_0 + i, action=action)
+            TimedAction(
+                timestamp=t_0 + i * self.config.environment_dt,
+                timestep=i_0 + i,
+                action=action,
+                chunk_position=i,
+                base_chunk=chunk_tensor,
+            )
             for i, action in enumerate(action_chunk)
         ]
 
