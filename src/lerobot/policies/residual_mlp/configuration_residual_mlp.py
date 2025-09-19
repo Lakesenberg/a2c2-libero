@@ -48,7 +48,7 @@ class ResidualMLPConfig(PreTrainedConfig):
     use_language: bool = True
 
     # Optimizer defaults.
-    optimizer_lr: float = 1e-4
+    optimizer_lr: float = 1e-5
     optimizer_weight_decay: float = 1e-5
 
     def __post_init__(self) -> None:
