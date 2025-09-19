@@ -28,6 +28,12 @@ new_features["vla_actions"] = {
                 "shape": (50,6),
                 "names": ["vla_actions"],
             }
+context_dim = base_policy.model.vlm_with_expert.config.text_config.hidden_size
+new_features["vlm_context"] = {
+                "dtype": "float32",
+                "shape": (context_dim,),
+                "names": ["vlm_context"],
+            }
  
 print(f"Base dataset features: {base_dataset.features}")
 print(f"New dataset features: {new_features}")
@@ -58,10 +64,14 @@ for i in range(len(base_dataset)):
             "task": base_dataset[i]["task"]
         }
     )
-    
+    vlm_context = getattr(base_policy, "vlm_context", None)
+    if vlm_context is None:
+        raise RuntimeError("Expected SmolVLA policy to expose `vlm_context` after inference.")
+
     predicted_action = predicted_action.squeeze(0)  # Remove batch dimension
     predicted_action = predicted_action.cpu()  # Move to CPU
-    
+    vlm_context = vlm_context.squeeze(0).cpu()
+
     new_dataset.add_frame(
         {
             "observation.images.wrist": base_dataset[i]["observation.images.wrist"].permute(1, 2, 0),
@@ -69,6 +79,7 @@ for i in range(len(base_dataset)):
             "observation.state": base_dataset[i]["observation.state"],
             "action": base_dataset[i]["action"],
             "vla_actions": predicted_action,
+            "vlm_context": vlm_context,
         },
         task=base_dataset[i]["task"],
     )

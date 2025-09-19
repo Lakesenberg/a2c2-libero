@@ -36,6 +36,7 @@ class ResidualTransformerConfig(PreTrainedConfig):
             "STATE": NormalizationMode.MEAN_STD,
             "ACTION": NormalizationMode.MEAN_STD,
             "ENV": NormalizationMode.MEAN_STD,
+            "CONTEXT": NormalizationMode.MEAN_STD,
         }
     )
 

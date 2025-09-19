@@ -196,6 +196,8 @@ class ResidualActTimeSliceDataset(Dataset):
         s["task"] = s_base["task"]
         s["input_ids"] = input_ids
         s["time_feature"] = time_feature
+        if "vlm_context" in s_base:
+            s["vlm_context"] = s_base["vlm_context"].clone()
         return s
 
         

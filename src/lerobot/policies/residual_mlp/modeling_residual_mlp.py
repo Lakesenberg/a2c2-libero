@@ -138,6 +138,10 @@ class ResidualMLP(nn.Module):
         self.action_proj = nn.Linear(self.config.action_feature.shape[0], self.dim_model)
         self.time_proj = nn.Linear(2, self.dim_model)
         self.language_proj = nn.Linear(960, self.dim_model) if self.config.use_language else None
+        vlm_feature = self.config.input_features.get("vlm_context")
+        self.vlm_context_proj = (
+            nn.Linear(vlm_feature.shape[0], self.dim_model) if vlm_feature is not None else None
+        )
 
         self.feature_norm = nn.LayerNorm(self.dim_model)
 
@@ -149,6 +153,8 @@ class ResidualMLP(nn.Module):
         if self.image_encoder is not None:
             num_feature_vectors += len(self.config.image_features)
         if self.language_proj is not None:
+            num_feature_vectors += 1
+        if self.vlm_context_proj is not None:
             num_feature_vectors += 1
 
         in_dim = self.dim_model * num_feature_vectors
@@ -242,6 +248,14 @@ class ResidualMLP(nn.Module):
                     language_feat = language_feat.mean(dim=1)
                 language_feat = language_feat.to(dtype=dtype)
             features.append(self.feature_norm(language_feat))
+
+        if self.vlm_context_proj is not None:
+            context = batch.get("vlm_context")
+            if context is None:
+                context_feat = torch.zeros(batch_size, self.dim_model, device=device, dtype=dtype)
+            else:
+                context_feat = self.vlm_context_proj(context.to(device=device, dtype=dtype))
+            features.append(self.feature_norm(context_feat))
 
         mlp_input = torch.cat(features, dim=-1)
         residual = self.mlp(mlp_input)

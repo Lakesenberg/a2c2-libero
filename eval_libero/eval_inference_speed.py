@@ -203,6 +203,8 @@ def eval_inference_speed_using_libero(base_policy: SmolVLAPolicy,
 
                         observation["time_feature"] = torch.tensor([np.cos(2 * np.pi * time_index/CHUNK_SIZE), np.sin(2 * np.pi * time_index/CHUNK_SIZE), time_index/CHUNK_SIZE], dtype=torch.float32).to(DEVICE).unsqueeze(0)
                         observation["language_embedding"] = base_policy.model.language_embeddings
+                        if getattr(base_policy, "vlm_context", None) is not None:
+                            observation["vlm_context"] = base_policy.vlm_context.to(DEVICE)
                         start_time = time.perf_counter()
                         updated_action = residual_policy.predict_action_chunk(observation).squeeze(0).cpu().numpy()[0]
                         end_time = time.perf_counter()

@@ -320,6 +320,12 @@ def eval_libero(base_policy: SmolVLAPolicy,
                             raise RuntimeError("Base policy does not provide language embeddings for residual correction.")
                         observation["language_embedding"] = lang_emb.to(DEVICE)
 
+                        vlm_context = getattr(base_policy, "vlm_context", None)
+                        if vlm_context is None:
+                            vlm_context = getattr(base_policy.model, "vlm_context", None)
+                        if vlm_context is not None:
+                            observation["vlm_context"] = vlm_context.to(DEVICE)
+
                         updated_action = (
                             residual_policy.predict_action_chunk(observation)
                             .squeeze(0)
