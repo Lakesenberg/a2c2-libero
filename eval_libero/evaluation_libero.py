@@ -230,11 +230,18 @@ def eval_libero(base_policy: SmolVLAPolicy,
                         chunk_size = new_action_chunk.shape[0]
                         new_time_offsets = np.arange(chunk_size, dtype=np.int64)
 
+                        vlm_hidden_chunk = getattr(base_policy, "vlm_hidden", None)
+                        if vlm_hidden_chunk is None:
+                            vlm_hidden_chunk = getattr(getattr(base_policy, "model", None), "vlm_hidden", None)
+                        if vlm_hidden_chunk is not None:
+                            vlm_hidden_chunk = vlm_hidden_chunk.detach().cpu().clone()
+
                         chunk_entries = [
                             {
                                 "action": new_action_chunk[i],
                                 "time_offset": int(new_time_offsets[i]),
                                 "chunk": new_action_chunk,
+                                "vlm_hidden": vlm_hidden_chunk,
                             }
                             for i in range(chunk_size)
                         ]
@@ -247,22 +254,22 @@ def eval_libero(base_policy: SmolVLAPolicy,
 
                         action_plan = collections.deque(exec_entries)
 
-                        if start_new > 0:
-                            pending_actions.extend(chunk_entries[:start_new])
-                        if execute_horizon < chunk_size:
-                            pending_actions.extend(chunk_entries[execute_horizon:])
+                    if execute_horizon < chunk_size:
+                        pending_actions.extend(chunk_entries[execute_horizon:])
 
                     if action_plan:
                         plan_entry = action_plan.popleft()
                         action = plan_entry["action"]
                         time_offset = plan_entry["time_offset"]
                         source_chunk = plan_entry["chunk"]
+                        vlm_hidden_entry = plan_entry.get("vlm_hidden")
                     else:
                         # Fallback - should not happen with correct logic
                         logging.warning("No actions in plan, using zero action")
                         action = np.zeros(7, dtype=np.float32)
                         time_offset = 0
                         source_chunk = np.zeros((1, action.shape[0]), dtype=np.float32)
+                        vlm_hidden_entry = None
 
                     if use_residual_policy and residual_policy is not None:
                         base_chunk_np = np.asarray(source_chunk, dtype=np.float32)
@@ -286,11 +293,10 @@ def eval_libero(base_policy: SmolVLAPolicy,
                         time_feature = torch.tensor([[math.sin(phase), math.cos(phase)]], dtype=torch.float32, device=DEVICE)
                         observation["time_feature"] = time_feature
 
-                        vlm_hidden = getattr(base_policy, "vlm_hidden", None)
-                        if vlm_hidden is None:
-                            vlm_hidden = getattr(base_policy.model, "vlm_hidden", None)
-                        if vlm_hidden is not None:
-                            observation["vlm_hidden"] = vlm_hidden.to(DEVICE)
+                        if vlm_hidden_entry is not None:
+                            observation["vlm_hidden"] = vlm_hidden_entry.to(DEVICE)
+                        else:
+                            observation.pop("vlm_hidden", None)
 
                         updated_action = (
                             residual_policy.predict_action_chunk(observation)
