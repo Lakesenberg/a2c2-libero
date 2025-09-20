@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 import torchvision
 from torch import Tensor, nn
+from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.ops.misc import FrozenBatchNorm2d
 
 from lerobot.constants import ACTION
@@ -29,6 +30,38 @@ from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.residual_transformer.configuration_residual_transformer import (
     ResidualTransformerConfig,
 )
+
+
+def sinusoidal_position_embedding_2d(
+    height: int,
+    width: int,
+    dim: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tensor:
+    """Return a (H·W, dim) 2D sinusoidal positional encoding."""
+    if dim % 2 != 0:
+        raise ValueError(f"Embedding dimension {dim} must be even for 2D encoding.")
+
+    def _positional_encoding(length: int, channels: int) -> Tensor:
+        position = torch.arange(length, device=device, dtype=dtype).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, channels, 2, device=device, dtype=dtype) * (-math.log(10000.0) / channels)
+        )
+        pe = torch.zeros(length, channels, device=device, dtype=dtype)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        return pe
+
+    half_dim = dim // 2
+    height_encoding = _positional_encoding(height, half_dim)
+    width_encoding = _positional_encoding(width, half_dim)
+
+    pos = torch.zeros(height, width, dim, device=device, dtype=dtype)
+    pos[:, :, :half_dim] = height_encoding[:, None, :]
+    pos[:, :, half_dim:] = width_encoding[None, :, :]
+    return pos.view(height * width, dim)
 
 
 class ResidualTransformerPolicy(PreTrainedPolicy):
@@ -101,8 +134,9 @@ class ResidualTransformerPolicy(PreTrainedPolicy):
         base_action = actions[:, 0]
         target_action = actions[:, 1]
 
-        action_pred = self.model(batch, base_action, batch.get("base_action_chunk"))
-        l1_loss = F.l1_loss(action_pred, target_action, reduction="mean")
+        residual_target = target_action - base_action
+        residual_pred = self.model(batch, base_action, batch.get("base_action_chunk"))
+        l1_loss = F.l1_loss(residual_pred, residual_target, reduction="mean")
 
         return l1_loss, {"l1_loss": l1_loss.item()}
 
@@ -121,8 +155,9 @@ class ResidualTransformerPolicy(PreTrainedPolicy):
         else:
             raise ValueError("Unexpected action tensor shape. Expected (B, action_dim) or (B, >=1, action_dim).")
 
-        action_norm = self.model(batch, base_action, batch.get("base_action_chunk"))
-        action = self.unnormalize_outputs({ACTION: action_norm.unsqueeze(1)})[ACTION]
+        residual_norm = self.model(batch, base_action, batch.get("base_action_chunk"))
+        final_action_norm = residual_norm + base_action
+        action = self.unnormalize_outputs({ACTION: final_action_norm.unsqueeze(1)})[ACTION]
         return action
 
     @torch.no_grad()
@@ -135,22 +170,25 @@ class ResidualTransformer(nn.Module):
         super().__init__()
         self.config = config
         self.dim_model = config.dim_model
+        self._spatial_pos_cache: dict[tuple[int, int], dict[tuple[str, torch.dtype], Tensor]] = {}
 
-        # Vision backbone -> single token per camera via global pooling.
         if self.config.image_features:
-            backbone = getattr(torchvision.models, config.vision_backbone)(
+            backbone_model = getattr(torchvision.models, config.vision_backbone)(
                 weights=config.pretrained_backbone_weights,
                 norm_layer=FrozenBatchNorm2d,
+                replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
             )
-            self.image_out_dim = backbone.fc.in_features
-            self.image_encoder = nn.Sequential(*list(backbone.children())[:-1])  # outputs (B, C, 1, 1)
-            self.image_proj = nn.Linear(self.image_out_dim, self.dim_model)
+            self.image_out_dim = backbone_model.fc.in_features
+            self.image_encoder = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
+            self.image_proj = nn.Conv2d(self.image_out_dim, self.dim_model, kernel_size=1)
+
             if config.freeze_vision_backbone:
                 self.image_encoder.eval()
                 for param in self.image_encoder.parameters():
                     param.requires_grad = False
         else:
             self.image_encoder = None
+            self.image_proj = None
 
         # Modal projections.
         if self.config.robot_state_feature is not None:
@@ -201,13 +239,15 @@ class ResidualTransformer(nn.Module):
         base_action: Tensor,
         base_action_chunk: Tensor | None = None,
     ) -> Tensor:
-        tokens = []
+        tokens: list[Tensor] = []
+        token_lengths: list[int] = []
         batch_size = base_action.shape[0]
         dtype = base_action.dtype
         device = base_action.device
 
         base_action_token = self.action_proj(base_action).unsqueeze(1)
         tokens.append(base_action_token)
+        token_lengths.append(base_action_token.shape[1])
 
         chunk_tokens = None
         if base_action_chunk is None:
@@ -223,28 +263,47 @@ class ResidualTransformer(nn.Module):
             time_feature = torch.zeros(batch_size, 2, device=device, dtype=dtype)
         else:
             time_feature = time_feature.to(device=device, dtype=dtype)
-        tokens.append(self.time_proj(time_feature).unsqueeze(1))
+        time_token = self.time_proj(time_feature).unsqueeze(1)
+        tokens.append(time_token)
+        token_lengths.append(time_token.shape[1])
 
         if chunk_tokens is not None:
             tokens.append(chunk_tokens)
+            token_lengths.append(chunk_tokens.shape[1])
 
         if self.state_proj is not None and "observation.state" in batch:
-            tokens.append(self.state_proj(batch["observation.state"].to(dtype)).unsqueeze(1))
+            state_token = self.state_proj(batch["observation.state"].to(dtype)).unsqueeze(1)
+            tokens.append(state_token)
+            token_lengths.append(state_token.shape[1])
         if self.env_state_proj is not None and "observation.environment_state" in batch:
-            tokens.append(self.env_state_proj(batch["observation.environment_state"].to(dtype)).unsqueeze(1))
+            env_token = self.env_state_proj(batch["observation.environment_state"].to(dtype)).unsqueeze(1)
+            tokens.append(env_token)
+            token_lengths.append(env_token.shape[1])
 
+        image_tokens_concat: Tensor | None = None
         if self.image_encoder is not None:
             image_tokens = []
             for key in self.config.image_features:
-                img = batch[key].to(dtype=torch.float32)
-                features = self.image_encoder(img).flatten(1)
-                image_tokens.append(self.image_proj(features).unsqueeze(1))
+                img = batch[key].to(device=device, dtype=torch.float32)
+                features_dict = self.image_encoder(img)
+                feature_map = features_dict.get("feature_map")
+                if feature_map is None:
+                    raise KeyError("Expected vision backbone to return key 'feature_map'.")
+                feature_map = feature_map.to(device=device, dtype=torch.float32)
+                projected = self.image_proj(feature_map).to(device=device, dtype=dtype)
+                bsz, _, height, width = projected.shape
+                pos_embed = self._get_spatial_pos_embed(height, width, device=device, dtype=dtype)
+                pos_embed = pos_embed.unsqueeze(0).expand(bsz, -1, -1)
+                projected = projected.flatten(2).transpose(1, 2)
+                image_tokens.append(projected + pos_embed)
             if image_tokens:
-                tokens.append(torch.cat(image_tokens, dim=1))
+                image_tokens_concat = torch.cat(image_tokens, dim=1)
 
         if self.vlm_hidden_proj is not None and "vlm_hidden" in batch:
             hidden_vec = batch["vlm_hidden"].to(device=device, dtype=dtype)
-            tokens.append(self.vlm_hidden_proj(hidden_vec).unsqueeze(1))
+            vlm_token = self.vlm_hidden_proj(hidden_vec).unsqueeze(1)
+            tokens.append(vlm_token)
+            token_lengths.append(vlm_token.shape[1])
 
         tasks = batch.get("task")
         if tasks is not None:
@@ -258,11 +317,55 @@ class ResidualTransformer(nn.Module):
             task_tensor = torch.tensor(task_values, device=device, dtype=dtype).unsqueeze(1)
         else:
             task_tensor = torch.zeros(batch_size, 1, device=device, dtype=dtype)
-        tokens.append(self.task_proj(task_tensor).unsqueeze(1))
+        task_token = self.task_proj(task_tensor).unsqueeze(1)
+        tokens.append(task_token)
+        token_lengths.append(task_token.shape[1])
 
-        x = torch.cat(tokens, dim=1)
-        x = x + self._positional_encoding(x.shape[1], device, dtype=x.dtype)
+        non_image_token_total = sum(token_lengths)
+        if non_image_token_total > 0:
+            pos = self._positional_encoding(non_image_token_total, device, dtype=dtype)
+            base_tokens = torch.cat(tokens, dim=1) + pos[:, :non_image_token_total]
+        else:
+            base_tokens = torch.empty(batch_size, 0, self.dim_model, device=device, dtype=dtype)
+
+        if image_tokens_concat is not None:
+            x = torch.cat([base_tokens, image_tokens_concat], dim=1)
+        else:
+            x = base_tokens
+
         x = self.encoder(x)
         cls_state = self.out_norm(x[:, 0])
         action_norm = self.action_head(cls_state)
         return action_norm
+
+    def _get_spatial_pos_embed(
+        self,
+        height: int,
+        width: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        cache_key = (height, width)
+        per_shape = self._spatial_pos_cache.setdefault(cache_key, {})
+        device_key = (str(device), dtype)
+
+        cached = per_shape.get(device_key)
+        if cached is not None:
+            return cached
+
+        base_key = ("cpu", torch.float32)
+        base = per_shape.get(base_key)
+        if base is None:
+            base = sinusoidal_position_embedding_2d(
+                height,
+                width,
+                self.dim_model,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            per_shape[base_key] = base
+
+        converted = base.to(device=device, dtype=dtype)
+        per_shape[device_key] = converted
+        return converted
