@@ -134,11 +134,10 @@ class ResidualTransformerPolicy(PreTrainedPolicy):
         base_action = actions[:, 0]
         target_action = actions[:, 1]
 
-        residual_target = target_action - base_action
-        residual_pred = self.model(batch, base_action, batch.get("base_action_chunk"))
-        l1_loss = F.l1_loss(residual_pred, residual_target, reduction="mean")
+        action_pred_norm = self.model(batch, base_action, batch.get("base_action_chunk"))
+        mse_loss = F.mse_loss(action_pred_norm, target_action, reduction="mean")
 
-        return l1_loss, {"l1_loss": l1_loss.item()}
+        return mse_loss, {"mse_loss": mse_loss.item()}
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: Dict[str, Tensor]) -> Tensor:
@@ -155,9 +154,8 @@ class ResidualTransformerPolicy(PreTrainedPolicy):
         else:
             raise ValueError("Unexpected action tensor shape. Expected (B, action_dim) or (B, >=1, action_dim).")
 
-        residual_norm = self.model(batch, base_action, batch.get("base_action_chunk"))
-        final_action_norm = residual_norm + base_action
-        action = self.unnormalize_outputs({ACTION: final_action_norm.unsqueeze(1)})[ACTION]
+        action_norm = self.model(batch, base_action, batch.get("base_action_chunk"))
+        action = self.unnormalize_outputs({ACTION: action_norm.unsqueeze(1)})[ACTION]
         return action
 
     @torch.no_grad()
