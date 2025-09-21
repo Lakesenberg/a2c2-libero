@@ -134,8 +134,9 @@ class ResidualTransformerPolicy(PreTrainedPolicy):
         base_action = actions[:, 0]
         target_action = actions[:, 1]
 
-        action_pred_norm = self.model(batch, base_action, batch.get("base_action_chunk"))
-        mse_loss = F.mse_loss(action_pred_norm, target_action, reduction="mean")
+        residual_norm = self.model(batch, base_action, batch.get("base_action_chunk"))
+        target_residual = target_action - base_action
+        mse_loss = F.mse_loss(residual_norm, target_residual, reduction="mean")
 
         return mse_loss, {"mse_loss": mse_loss.item()}
 
@@ -154,7 +155,8 @@ class ResidualTransformerPolicy(PreTrainedPolicy):
         else:
             raise ValueError("Unexpected action tensor shape. Expected (B, action_dim) or (B, >=1, action_dim).")
 
-        action_norm = self.model(batch, base_action, batch.get("base_action_chunk"))
+        residual_norm = self.model(batch, base_action, batch.get("base_action_chunk"))
+        action_norm = base_action + residual_norm
         action = self.unnormalize_outputs({ACTION: action_norm.unsqueeze(1)})[ACTION]
         return action
 
@@ -207,6 +209,8 @@ class ResidualTransformer(nn.Module):
             self.vlm_hidden_proj = None
         self.task_proj = nn.Linear(1, self.dim_model)
 
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.dim_model))
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.dim_model,
             nhead=self.config.n_heads,
@@ -218,7 +222,19 @@ class ResidualTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=self.config.n_encoder_layers)
 
         self.out_norm = nn.LayerNorm(self.dim_model)
-        self.action_head = nn.Linear(self.dim_model, self.config.action_feature.shape[0])
+        hidden_dim = self.dim_model
+        action_dim = self.config.action_feature.shape[0]
+        mlp_hidden = hidden_dim * 2
+        dropout = self.config.dropout
+        self.residual_head = nn.Sequential(
+            nn.Linear(hidden_dim + action_dim, mlp_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden, mlp_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden, action_dim),
+        )
 
     def _positional_encoding(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> Tensor:
         position = torch.arange(seq_len, device=device, dtype=dtype).unsqueeze(1)
@@ -237,17 +253,18 @@ class ResidualTransformer(nn.Module):
         base_action: Tensor,
         base_action_chunk: Tensor | None = None,
     ) -> Tensor:
-        tokens: list[Tensor] = []
-        token_lengths: list[int] = []
+        tokens_main: list[Tensor] = []
+        main_lengths: list[int] = []
+        chunk_tokens: Tensor | None = None
+        chunk_length = 0
         batch_size = base_action.shape[0]
         dtype = base_action.dtype
         device = base_action.device
 
-        base_action_token = self.action_proj(base_action).unsqueeze(1)
-        tokens.append(base_action_token)
-        token_lengths.append(base_action_token.shape[1])
+        cls_token = self.cls_token.to(device=device, dtype=dtype).expand(batch_size, -1, -1)
+        tokens_main.append(cls_token)
+        main_lengths.append(cls_token.shape[1])
 
-        chunk_tokens = None
         if base_action_chunk is None:
             base_action_chunk = batch.get("base_action_chunk")
         if base_action_chunk is not None:
@@ -255,6 +272,7 @@ class ResidualTransformer(nn.Module):
             if chunk.ndim == 2:
                 chunk = chunk.unsqueeze(1)
             chunk_tokens = self.action_proj(chunk)
+            chunk_length = chunk_tokens.shape[1]
 
         time_feature = batch.get("time_feature")
         if time_feature is None:
@@ -262,21 +280,59 @@ class ResidualTransformer(nn.Module):
         else:
             time_feature = time_feature.to(device=device, dtype=dtype)
         time_token = self.time_proj(time_feature).unsqueeze(1)
-        tokens.append(time_token)
-        token_lengths.append(time_token.shape[1])
-
-        if chunk_tokens is not None:
-            tokens.append(chunk_tokens)
-            token_lengths.append(chunk_tokens.shape[1])
+        tokens_main.append(time_token)
+        main_lengths.append(time_token.shape[1])
 
         if self.state_proj is not None and "observation.state" in batch:
-            state_token = self.state_proj(batch["observation.state"].to(dtype)).unsqueeze(1)
-            tokens.append(state_token)
-            token_lengths.append(state_token.shape[1])
+            state_values = batch["observation.state"].to(device=device, dtype=dtype)
+            state_token = self.state_proj(state_values).unsqueeze(1)
+            tokens_main.append(state_token)
+            main_lengths.append(state_token.shape[1])
         if self.env_state_proj is not None and "observation.environment_state" in batch:
-            env_token = self.env_state_proj(batch["observation.environment_state"].to(dtype)).unsqueeze(1)
-            tokens.append(env_token)
-            token_lengths.append(env_token.shape[1])
+            env_values = batch["observation.environment_state"].to(device=device, dtype=dtype)
+            env_token = self.env_state_proj(env_values).unsqueeze(1)
+            tokens_main.append(env_token)
+            main_lengths.append(env_token.shape[1])
+
+        if self.vlm_hidden_proj is not None and "vlm_hidden" in batch:
+            hidden_vec = batch["vlm_hidden"].to(device=device, dtype=dtype)
+            vlm_token = self.vlm_hidden_proj(hidden_vec).unsqueeze(1)
+            tokens_main.append(vlm_token)
+            main_lengths.append(vlm_token.shape[1])
+
+        tasks = batch.get("task")
+        if tasks is not None:
+            if isinstance(tasks, str):
+                tasks = [tasks] * batch_size
+            task_values = []
+            for task in tasks:
+                digest = hashlib.sha1(task.encode("utf-8")).digest()
+                value = int.from_bytes(digest[:4], "little") / float(0xFFFFFFFF)
+                task_values.append(value)
+            task_tensor = torch.tensor(task_values, device=device, dtype=dtype).unsqueeze(1)
+        else:
+            task_tensor = torch.zeros(batch_size, 1, device=device, dtype=dtype)
+        task_token = self.task_proj(task_tensor).unsqueeze(1)
+        tokens_main.append(task_token)
+        main_lengths.append(task_token.shape[1])
+
+        main_total = sum(main_lengths)
+        total_len = main_total + chunk_length
+        pos = self._positional_encoding(total_len, device, dtype=dtype) if total_len > 0 else None
+
+        if main_total > 0:
+            main_tokens = torch.cat(tokens_main, dim=1)
+            if pos is not None:
+                main_tokens = main_tokens + pos[:, :main_total]
+        else:
+            main_tokens = torch.empty(batch_size, 0, self.dim_model, device=device, dtype=dtype)
+
+        if chunk_tokens is not None:
+            if pos is not None:
+                chunk_tokens = chunk_tokens + pos[:, main_total : main_total + chunk_length]
+            base_tokens = torch.cat([main_tokens, chunk_tokens], dim=1)
+        else:
+            base_tokens = main_tokens
 
         image_tokens_concat: Tensor | None = None
         if self.image_encoder is not None:
@@ -297,35 +353,6 @@ class ResidualTransformer(nn.Module):
             if image_tokens:
                 image_tokens_concat = torch.cat(image_tokens, dim=1)
 
-        if self.vlm_hidden_proj is not None and "vlm_hidden" in batch:
-            hidden_vec = batch["vlm_hidden"].to(device=device, dtype=dtype)
-            vlm_token = self.vlm_hidden_proj(hidden_vec).unsqueeze(1)
-            tokens.append(vlm_token)
-            token_lengths.append(vlm_token.shape[1])
-
-        tasks = batch.get("task")
-        if tasks is not None:
-            if isinstance(tasks, str):
-                tasks = [tasks] * batch_size
-            task_values = []
-            for task in tasks:
-                digest = hashlib.sha1(task.encode("utf-8")).digest()
-                value = int.from_bytes(digest[:4], "little") / float(0xFFFFFFFF)
-                task_values.append(value)
-            task_tensor = torch.tensor(task_values, device=device, dtype=dtype).unsqueeze(1)
-        else:
-            task_tensor = torch.zeros(batch_size, 1, device=device, dtype=dtype)
-        task_token = self.task_proj(task_tensor).unsqueeze(1)
-        tokens.append(task_token)
-        token_lengths.append(task_token.shape[1])
-
-        non_image_token_total = sum(token_lengths)
-        if non_image_token_total > 0:
-            pos = self._positional_encoding(non_image_token_total, device, dtype=dtype)
-            base_tokens = torch.cat(tokens, dim=1) + pos[:, :non_image_token_total]
-        else:
-            base_tokens = torch.empty(batch_size, 0, self.dim_model, device=device, dtype=dtype)
-
         if image_tokens_concat is not None:
             x = torch.cat([base_tokens, image_tokens_concat], dim=1)
         else:
@@ -333,7 +360,8 @@ class ResidualTransformer(nn.Module):
 
         x = self.encoder(x)
         cls_state = self.out_norm(x[:, 0])
-        action_norm = self.action_head(cls_state)
+        residual = self.residual_head(torch.cat([cls_state, base_action], dim=-1))
+        action_norm = base_action + residual
         return action_norm
 
     def _get_spatial_pos_embed(

@@ -36,14 +36,13 @@ class ResidualTransformerConfig(PreTrainedConfig):
             "STATE": NormalizationMode.MEAN_STD,
             "ACTION": NormalizationMode.MEAN_STD,
             "ENV": NormalizationMode.MEAN_STD,
-            "CONTEXT": NormalizationMode.MEAN_STD,
         }
     )
 
     # Vision backbone settings.
     vision_backbone: str = "resnet18"
     pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1"
-    freeze_vision_backbone: bool = False
+    freeze_vision_backbone: bool = True
     replace_final_stride_with_dilation: bool = False
 
     # Transformer architecture.
