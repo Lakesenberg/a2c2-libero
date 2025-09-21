@@ -224,10 +224,13 @@ class ResidualTransformer(nn.Module):
         self.out_norm = nn.LayerNorm(self.dim_model)
         hidden_dim = self.dim_model
         action_dim = self.config.action_feature.shape[0]
+        self.time_dim = 2
+        self.state_dim = self.config.robot_state_feature.shape[0] if self.config.robot_state_feature is not None else 0
+        residual_in_dim = hidden_dim + action_dim + self.time_dim + self.state_dim
         mlp_hidden = hidden_dim * 2
         dropout = self.config.dropout
         self.residual_head = nn.Sequential(
-            nn.Linear(hidden_dim + action_dim, mlp_hidden),
+            nn.Linear(residual_in_dim, mlp_hidden),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(mlp_hidden, mlp_hidden),
@@ -276,18 +279,22 @@ class ResidualTransformer(nn.Module):
 
         time_feature = batch.get("time_feature")
         if time_feature is None:
-            time_feature = torch.zeros(batch_size, 2, device=device, dtype=dtype)
+            time_feature = torch.zeros(batch_size, self.time_dim, device=device, dtype=dtype)
         else:
             time_feature = time_feature.to(device=device, dtype=dtype)
         time_token = self.time_proj(time_feature).unsqueeze(1)
         tokens_main.append(time_token)
         main_lengths.append(time_token.shape[1])
 
+        state_values_for_head = None
         if self.state_proj is not None and "observation.state" in batch:
             state_values = batch["observation.state"].to(device=device, dtype=dtype)
+            state_values_for_head = state_values
             state_token = self.state_proj(state_values).unsqueeze(1)
             tokens_main.append(state_token)
             main_lengths.append(state_token.shape[1])
+        elif self.state_dim > 0:
+            state_values_for_head = torch.zeros(batch_size, self.state_dim, device=device, dtype=dtype)
         if self.env_state_proj is not None and "observation.environment_state" in batch:
             env_values = batch["observation.environment_state"].to(device=device, dtype=dtype)
             env_token = self.env_state_proj(env_values).unsqueeze(1)
@@ -360,7 +367,8 @@ class ResidualTransformer(nn.Module):
 
         x = self.encoder(x)
         cls_state = self.out_norm(x[:, 0])
-        residual = self.residual_head(torch.cat([cls_state, base_action], dim=-1))
+        residual_inputs = [cls_state, base_action, time_feature,state_values_for_head]
+        residual = self.residual_head(torch.cat(residual_inputs, dim=-1))
         return residual
 
     def _get_spatial_pos_embed(
