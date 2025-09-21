@@ -361,8 +361,7 @@ class ResidualTransformer(nn.Module):
         x = self.encoder(x)
         cls_state = self.out_norm(x[:, 0])
         residual = self.residual_head(torch.cat([cls_state, base_action], dim=-1))
-        action_norm = base_action + residual
-        return action_norm
+        return residual
 
     def _get_spatial_pos_embed(
         self,
