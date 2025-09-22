@@ -9,7 +9,7 @@ uv pip install -e ".[smolvla]"
 # Install libero and mujoco for evaluation
 ```bash
 uv pip install -e third_party/libero
-uv pip install mujoco==3.2.3
+uv pip install mujoco==3.3.2
 export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
 ```
 ### Docker 
