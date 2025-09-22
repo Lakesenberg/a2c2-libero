@@ -5,7 +5,7 @@ import os
 if os.environ.get("HF_TOKEN") is None:
     raise ValueError("Please set the HF_TOKEN environment variable with your Hugging Face token.")
 
-BASE_REPO_NAME = "k1000dai/libero-object-smolvla-add-vlm-context"
+BASE_REPO_NAME = "k1000dai/libero-spatial-smolvla-add-vlm-context"
 
 
 spatial_task_list = [
