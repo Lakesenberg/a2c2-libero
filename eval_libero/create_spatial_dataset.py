@@ -5,8 +5,8 @@ import os
 if os.environ.get("HF_TOKEN") is None:
     raise ValueError("Please set the HF_TOKEN environment variable with your Hugging Face token.")
 
-BASE_REPO_NAME = "k1000dai/libero"
-UPLOAD_REPO_NAME = "k1000dai/libero-spatial"
+BASE_REPO_NAME = "dataset/to/libero"
+UPLOAD_REPO_NAME = "dataset/to/libero-spatial"
 
 base_dataset = LeRobotDataset(
     repo_id=BASE_REPO_NAME,

@@ -13,9 +13,9 @@ BATCH_SIZE = 32
 if os.environ.get("HF_TOKEN") is None:
     raise ValueError("Please set the HF_TOKEN environment variable with your Hugging Face token.")
 
-BASE_REPO_NAME = "k1000dai/so101_put_on_conveyor_slow_training"
-UPLOAD_REPO_NAME = "k1000dai/so101_put_on_conveyor_slow_training-smolvla"
-BASE_POLICY_NAME = "k1000dai/smolvla_conveyor_slow_finetune"
+BASE_REPO_NAME = "dataset/to/so101_put_on_conveyor_slow_training"
+UPLOAD_REPO_NAME = "dataaset/to/so101_put_on_conveyor_slow_training-smolvla"
+BASE_POLICY_NAME = "dataset/to/smolvla_conveyor_slow_finetune"
 
 base_dataset = LeRobotDataset(
     repo_id=BASE_REPO_NAME,

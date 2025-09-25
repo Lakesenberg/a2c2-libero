@@ -7,9 +7,9 @@ from tqdm import tqdm
 if os.environ.get("HF_TOKEN") is None:
     raise ValueError("Please set the HF_TOKEN environment variable with your Hugging Face token.")
 
-BASE_REPO_NAME_SLOW = "k1000dai/so101_put_yellow_block_on_conveyor_slow"
-BASE_REPO_NAME_FAST = "k1000dai/so101_put_yellow_block_on_conveyor_fast"
-UPLOAD_REPO_NAME = "k1000dai/so101_put_yellow_block_on_conveyor_mix"
+BASE_REPO_NAME_SLOW = "dataset/to/so101_put_yellow_block_on_conveyor_slow"
+BASE_REPO_NAME_FAST = "dataset/to/so101_put_yellow_block_on_conveyor_fast"
+UPLOAD_REPO_NAME = "dataset/to/so101_put_yellow_block_on_conveyor_mix"
 
 base_dataset_slow = LeRobotDataset(
     repo_id=BASE_REPO_NAME_SLOW,

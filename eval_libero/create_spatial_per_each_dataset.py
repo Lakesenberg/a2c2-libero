@@ -5,7 +5,7 @@ import os
 if os.environ.get("HF_TOKEN") is None:
     raise ValueError("Please set the HF_TOKEN environment variable with your Hugging Face token.")
 
-BASE_REPO_NAME = "k1000dai/libero-spatial-smolvla-add-vlm-context"
+BASE_REPO_NAME = "dataset/to/libero-spatial-smolvla-add-vlm-context"
 
 
 spatial_task_list = [
@@ -24,7 +24,7 @@ spatial_task_list = [
 for spatial_task in spatial_task_list:
     print(f"Processing spatial task: {spatial_task}")
     spatial_task_sanitized = spatial_task.replace(" ", "_").replace(",", "").replace(".", "").replace("(", "").replace(")", "") 
-    UPLOAD_REPO_NAME = f"k1000dai/libero-{spatial_task_sanitized}"
+    UPLOAD_REPO_NAME = f"dataset/tp/libero-{spatial_task_sanitized}"
 
     base_dataset = LeRobotDataset(
         repo_id=BASE_REPO_NAME,

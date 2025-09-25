@@ -23,8 +23,8 @@ NUM_STEPS_WAIT = 10
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def eval() -> None:
-    base_policy_path: str = "k1000dai/smolvla_libero_scratch"
-    residual_policy_path: str = "k1000dai/residualact_libero_small_200k"
+    base_policy_path: str = "policy/to/smolvla_libero_scratch"
+    residual_policy_path: str = "policy/to/residual_transformer_libero_spatial"
     num_trials = 100
     seed = 7
     # Set random seed

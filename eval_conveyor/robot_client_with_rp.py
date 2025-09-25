@@ -160,7 +160,7 @@ class RobotClient:
 
         self.use_residual_policy = True
         if self.use_residual_policy:
-            self.residual_policy = ResidualACTPolicy.from_pretrained("k1000dai/residualact_conveyor_fast")
+            self.residual_policy = ResidualACTPolicy.from_pretrained("policy/to/residualact_conveyor_fast")
             self.residual_policy.to("cuda")
             self.residual_policy.eval()
 

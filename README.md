@@ -26,23 +26,30 @@ cd docker
 python src/lerobot/scripts/train.py  \
 --policy.type=smolvla   \
 --policy.load_vlm_weights True  \
---dataset.repo_id=k1000dai/libero \
+--dataset.repo_id=dataset/to/libero \
 --batch_size=64 \
 --steps=100000 \
---policy.repo_id=k1000dai/smolvla_libero_scratch \
+--policy.repo_id=username/to/repo \
 --output_dir=libero_smolvla_scratch  \
 --job_name=libero_smolvla_scratch \
 --wandb.enable=true
 ```
+
+### Create Residual Dataset
+Change the `BASE_REPO_NAME`, `UPLOAD_REPO_NAME`, and `BASE_POLICY_NAME` in `eval_libero/create_dataset_for_residualpolicy.py` to your dataset and policy names, then run:
+```bash
+python eval_libero/create_dataset_for_residualpolicy.py
+```
+
 ### Residual Transformer
 ```bash
 python src/lerobot/scripts/train_residual_transformer.py \
 --policy.type residual_transformer \
---policy.repo_id k1000dai/residual_transformer_libero_spatial \
+--policy.repo_id username/residual_transformer_libero_spatial \
 --batch_size 64 \
 --num_workers 16 \
 --steps 400000 \
---dataset.repo_id k1000dai/libero-spatial-smolvla \
+--dataset.repo_id dataset/to/libero-spatial-smolvla \
 --output_dir output_residual_transformer_spatial \
 --job_name residual_transformer_libero_spatial \
 --wandb.enable True
@@ -53,26 +60,13 @@ The current residual transformer consumes the entire base-policy action chunk at
 
 1. The base policy action you intend to execute (`action[:, 0]`).
 2. The full chunk predicted by the base policy under the key `base_action_chunk`.
-3. The phase feature matching `train_residual_transformer.py` (sine/cosine of the chunk index).
+3. The phase feature matching `train_residual_transformer.py` (sin/cos of the chunk index).
 
 Without these inputs the transformer will fall back to the base action token only and refinement quality will degrade.
 
-### Residual MLP
-```bash
-python src/lerobot/scripts/train_residual_transformer.py \
---policy.type residual_mlp \
---policy.repo_id k1000dai/residual_mlp_libero_spatial \
---batch_size 64 \
---num_workers 16 \
---steps 400000 \
---dataset.repo_id k1000dai/libero-spatial-smolvla \
---output_dir output_residual_mlp_spatial \
---job_name residual_mlp_libero_spatial \
---wandb.enable True
-```
-This uses the same training loop but instantiates the MLP head (`--policy.type residual_mlp`) that directly regresses the refined action. Vision encoders remain frozen by default; tune `--policy.dim_model` or `--policy.hidden_dims` as needed for your dataset scale.
-
 ## Evaluation
+Change the `base_policy_path` and `residual_policy_path` in `eval_libero/evaluation_libero.py` to your policy names, then run:
 ```bash
 MUJOCO_GL=glx python eval_libero/evaluation_libero.py 
 ```
+Please use mujoco 3.3.2 for evaluation. Any other version may cause unexpected errors or bad performance.
