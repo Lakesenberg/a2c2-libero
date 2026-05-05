@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a2c2-libero"
+version = "0.1.0"
+description = "Asynchronous SmolVLA + A2C2 hierarchical inference for LIBERO."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Lakesenberg" }]
+license = { text = "MIT" }
+dependencies = [
+    "torch>=2.1",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7",
+    "pytest-timeout>=2",
+]
+libero = [
+    # Pulls in lerobot's libero extra. The user is expected to have
+    # cloned/installed lerobot separately for full env support.
+    "lerobot[libero]",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["a2c2_libero*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: marks tests as slow (LIBERO, GPU, etc.)",
+]
+timeout = 30
+filterwarnings = [
+    # The exception-propagation test deliberately raises in the worker thread.
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+]
