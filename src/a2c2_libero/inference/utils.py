@@ -25,21 +25,50 @@ def build_state(
     tau_k: torch.Tensor,
     z: torch.Tensor,
     lang_emb: torch.Tensor | None = None,
+    base_action_chunk: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Build the input state dict for the A2C2 head.
+    """Build the input state dict for the A2C2 residual transformer head.
 
-    The exact format must match what was used at training time. This is a
-    canonical version: future heads may expect different field names; keep this
-    function as the single source of truth and re-train if you change it.
+    The exact format must match what was used at training time
+    (`src/lerobot/scripts/train_residual_transformer.py`). The trained head
+    expects:
+
+      - ``observation.state``     - current proprio (single step)
+      - ``observation.image*``    - camera frames
+      - ``action``                - the single base action to be executed at this tick
+      - ``base_action_chunk``     - the FULL chunk predicted by the base SmolVLA at
+                                    the current chunk start (shape [H, action_dim])
+      - ``time_feature``          - sin/cos chunk-index encoding (shape [2])
+      - ``vlm_hidden``            - cached VLM latent from SmolVLA at the chunk start
+
+    Without ``base_action_chunk`` and ``time_feature`` the residual transformer
+    falls back to the single-action token path and refinement quality drops; see
+    the upstream README at
+    https://github.com/k1000dai/a2c2-libero#residual-transformer .
     """
     state: dict[str, torch.Tensor] = {
+        # Legacy nested-obs key (consumed by MLP head and old tests).
         "obs": obs,
+        # Backwards-compat aliases.
         "a_base": a_base,
         "tau_k": tau_k,
         "z": z,
     }
+    # Flat-key schema matching train_residual_transformer.py contract.
+    state["action"] = a_base
+    state["time_feature"] = tau_k
+    state["vlm_hidden"] = z
+    if base_action_chunk is not None:
+        state["base_action_chunk"] = base_action_chunk
     if lang_emb is not None:
         state["lang_emb"] = lang_emb
+    # Also flatten obs dict keys to top level so the residual-transformer
+    # contract keys ("observation.state", "observation.images.*") are
+    # directly accessible without unwrapping `state["obs"]`.
+    if isinstance(obs, dict):
+        for k, v in obs.items():
+            if k not in state:
+                state[k] = v
     return state
 
 
@@ -47,16 +76,18 @@ def flatten_state_for_mlp(state: dict[str, torch.Tensor]) -> torch.Tensor:
     """Flatten a state dict into a single vector for an MLP head.
 
     For a Transformer-based head, you would tokenize differently; this helper
-    is provided for the lightweight MLP variant of the A2C2 head.
+    is provided for the lightweight MLP variant of the A2C2 head. It only
+    consumes the canonical aliases (``a_base``, ``tau_k``, ``z``) plus any
+    observation tensors. ``base_action_chunk`` is intentionally skipped here
+    because the MLP head doesn't use chunk context.
     """
     parts = []
-    obs = state["obs"]
+    obs = state.get("obs")
     if isinstance(obs, dict):
-        # Concatenate all observation tensors after flattening.
         for key in sorted(obs.keys()):
             v = obs[key]
             parts.append(v.reshape(v.shape[0] if v.ndim > 1 else 1, -1) if v.ndim >= 1 else v.reshape(1, -1))
-    else:
+    elif isinstance(obs, torch.Tensor):
         parts.append(obs.reshape(obs.shape[0] if obs.ndim > 1 else 1, -1))
 
     for key in ("a_base", "tau_k", "z", "lang_emb"):

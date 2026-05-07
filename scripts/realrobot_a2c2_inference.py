@@ -1,8 +1,21 @@
 """Real-robot A2C2 inference on bi-SO-ARM (or any LeRobot robot).
 
-Bypasses lerobot-rollout / inference factory. Loads SmolVLA + A2C2 head
-directly, drives the robot at the highest tick rate it supports, records
-to a LeRobot dataset.
+Bypasses lerobot-rollout / inference factory. Loads SmolVLA + the residual
+transformer A2C2 head directly, drives the robot at the highest tick rate
+it supports, and records to a LeRobot dataset.
+
+The script feeds the residual head the same fields used at training time
+in ``src/lerobot/scripts/train_residual_transformer.py``:
+
+* ``action``             - single-step base action to execute this tick
+* ``base_action_chunk``  - the FULL chunk produced by SmolVLA at chunk start
+* ``time_feature``       - sin/cos of the chunk index (k / H)
+* ``vlm_hidden``         - cached VLM latent at chunk start
+* ``observation.*``      - current observation
+
+Without ``base_action_chunk`` and ``time_feature`` the residual transformer
+falls back to base-action-only mode and refinement quality drops; see
+upstream README at https://github.com/k1000dai/a2c2-libero .
 
 Usage:
     python scripts/realrobot_a2c2_inference.py \

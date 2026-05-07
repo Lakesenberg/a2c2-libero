@@ -95,18 +95,25 @@ class A2C2Engine:
     # ------------------------------------------------------------------ #
     @torch.no_grad()
     def step_sync(self, obs: Any, language: str | None = None) -> torch.Tensor:
-        """One control tick, blocking on SmolVLA when chunk is exhausted."""
+        """One control tick, blocking on SmolVLA when chunk is exhausted.
+
+        Feeds the residual head the same fields the training pipeline
+        produced: single-step ``action`` + full ``base_action_chunk`` +
+        ``time_feature`` + ``vlm_hidden``. See README of upstream
+        a2c2-libero for the contract.
+        """
         chunk = self.board.chunk
         if chunk is None or self.board.k >= self.H:
             chunk, z = self.smolvla_fn(obs, language)
             self.board.install_chunk(chunk, z, self.global_tick)
 
         k_eff = min(self.board.k, self.H - 1)
-        a_base = self.board.chunk[k_eff]
+        full_chunk = self.board.chunk          # [H, action_dim]
+        a_base = full_chunk[k_eff]
         z = self.board.z
 
         tau_k = sincos_pos_encoding(k_eff, self.H, device=self.device)
-        state = build_state(obs, a_base, tau_k, z)
+        state = build_state(obs, a_base, tau_k, z, base_action_chunk=full_chunk)
         delta = self.head_fn(state)
 
         self.board.advance_k(max_k=self.H)
@@ -138,7 +145,10 @@ class A2C2Engine:
         a_base = chunk[k_eff]
 
         tau_k = sincos_pos_encoding(k_eff, self.H, device=self.device)
-        state = build_state(obs, a_base, tau_k, z)
+        # Pass the full chunk (not just a_base) so the residual transformer
+        # can attend over the entire predicted trajectory, matching the
+        # training-time interface in train_residual_transformer.py.
+        state = build_state(obs, a_base, tau_k, z, base_action_chunk=chunk)
         delta = self.head_fn(state)
 
         self.board.advance_k(max_k=self.H)
