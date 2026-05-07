@@ -177,6 +177,159 @@ transformer falls back to the base-action-only path — see `docs/DEBUG_JOURNEY.
 
 ---
 
+## 4090-only inference (server-free workflow)
+
+If you already have the SmolVLA + residual head checkpoints on the 4090 box and
+do **not** need any A100 access, you can run everything locally. Useful when:
+
+- The A100 is unreachable (different network / off / decommissioned)
+- You pulled the ckpts once via `scp` and want to iterate quickly
+- You want to demo the system without LAN dependencies
+
+### 0. Bootstrap (4090 only)
+
+```bash
+git clone https://github.com/Lakesenberg/a2c2-libero.git
+cd a2c2-libero
+git switch inference_test_async
+git submodule update --init --recursive
+
+uv venv -p 3.10 && source .venv/bin/activate
+uv pip install -e ".[smolvla]"
+uv pip install -e third_party/libero       # only needed for LIBERO sim eval
+uv pip install mujoco==3.3.2                # only needed for LIBERO sim eval
+export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
+```
+
+### 1. Place the two checkpoints under `outputs/`
+
+Expected layout:
+
+```
+outputs/
+├── smolvla_v21/
+│   ├── model.safetensors        ← SmolVLA weights
+│   └── config.json
+└── a2c2_head_v21/
+    ├── model.safetensors        ← residual transformer weights
+    └── config.json
+```
+
+Get them from any of:
+
+```bash
+# Option A — from HuggingFace (no server needed)
+mkdir -p outputs
+huggingface-cli download <hf_user>/smolvla_v21       --local-dir outputs/smolvla_v21
+huggingface-cli download <hf_user>/a2c2_head_v21     --local-dir outputs/a2c2_head_v21
+
+# Option B — copy from a USB / network drive
+cp -r /path/to/external/smolvla_v21       outputs/
+cp -r /path/to/external/a2c2_head_v21     outputs/
+
+# Option C — one-shot scp from the A100 (server reachable but you only do this once)
+scp -r a100:~/a2c2-libero/outputs/a2c2_head_v21/checkpoints/060000/pretrained_model \
+       outputs/a2c2_head_v21
+scp -r a100:/root/project/lq/lerobot/outputs/train/smolvla_a2c2_v21/checkpoints/020000/pretrained_model \
+       outputs/smolvla_v21
+```
+
+Verify:
+
+```bash
+ls outputs/smolvla_v21/ outputs/a2c2_head_v21/
+# Both should show: model.safetensors  config.json
+```
+
+### 2. Real-robot inference (no server needed)
+
+```bash
+# One-time: calibrate + check cameras
+lerobot-calibrate --robot.type=so100_follower --robot.id=<your_id>
+lerobot-find-cameras
+
+# Smoke test — 1 episode, no recording, fully local
+python scripts/realrobot_a2c2_inference.py \
+    --smolvla-path outputs/smolvla_v21 \
+    --head-ckpt    outputs/a2c2_head_v21/model.safetensors \
+    --robot-type   so100_follower \
+    --robot-id     <your_robot_id> \
+    --action-dim   6 \
+    --chunk-size   50 \
+    --episodes     1 \
+    --task         "pick up the cup" \
+    --home-on-start \
+    --no-record
+
+# Full eval — 10 episodes with recording
+python scripts/realrobot_a2c2_inference.py \
+    --smolvla-path outputs/smolvla_v21 \
+    --head-ckpt    outputs/a2c2_head_v21/model.safetensors \
+    --robot-type   so100_follower \
+    --robot-id     <your_robot_id> \
+    --action-dim   6 \
+    --chunk-size   50 \
+    --episodes     10 \
+    --task         "pick up the cup" \
+    --dataset-repo <hf_user>/realrobot_a2c2_eval \
+    --home-on-start
+```
+
+Use `HF_HUB_OFFLINE=1` if you don't want any HuggingFace API calls during
+inference (purely local-cache reads).
+
+### 3. LIBERO simulator eval (no real robot, no server)
+
+```bash
+export MUJOCO_GL=egl
+
+python scripts/a100_inference_test.py \
+    --mode env \
+    --task libero_spatial \
+    --policy-path outputs/smolvla_v21 \
+    --head-ckpt   outputs/a2c2_head_v21/model.safetensors \
+    --episodes    5 \
+    --max-episode-steps 300 \
+    --output      logs/4090_local_eval.json
+```
+
+Or use the provided 4090 wrapper but disable server fetching:
+
+```bash
+SUITE=libero_10 CKPT_SOURCE=local ./scripts/inference_4090.sh
+```
+
+(`CKPT_SOURCE=local` skips both `hf` and `server` paths and reads ckpts from
+the existing `outputs/` directory.)
+
+### 4. Quick latency / throughput benchmark (no robot, no LIBERO)
+
+```bash
+python scripts/a100_inference_test.py \
+    --mode synthetic \
+    --policy-path outputs/smolvla_v21 \
+    --head-ckpt   outputs/a2c2_head_v21/model.safetensors \
+    --ticks       1000 \
+    --tick-dt-ms  5 \
+    --output      logs/4090_synthetic_bench.json
+```
+
+Reports per-tick latency p50/p95/p99, SmolVLA forward time, GPU memory.
+Use this to confirm the 4090 can hit your control rate before plugging in
+the robot.
+
+### 5. Troubleshooting (4090-only path)
+
+| Symptom | Fix |
+|---|---|
+| `model.safetensors: file not found` | Wrong `--head-ckpt` path; should point at the file inside `outputs/a2c2_head_v21/`, not the dir |
+| `LatentHook` couldn't locate backbone | SmolVLA internals differ; print `for n,_ in p.named_modules(): print(n)` and patch the hook target in `realrobot_a2c2_inference.py` |
+| Per-tick latency p99 > 15 ms | Confirm SmolVLA worker is async; verify `--device cuda` is in effect via `nvidia-smi` while running |
+| Robot drifts mid-chunk | The residual head is missing inputs — make sure you're running the latest `inference_test_async` branch (commit ≥ `30e9624`) which passes the full `base_action_chunk` |
+| Action sent during cold start | Expected; engine returns `safe_action` (zeros) for the first ~`H` ticks until SmolVLA produces its first chunk. Pre-position the robot before pressing ENTER |
+
+---
+
 ## Async timing model
 
 ```
