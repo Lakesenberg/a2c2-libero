@@ -152,9 +152,45 @@ def _resolve_ckpt_path(path, kind):
     )
 
 
-def _load_smolvla(path, device):
+def _override_dataset_in_config(ckpt_dir, dataset_repo_id, dataset_root):
+    """If the policy's config.json points at a dataset that isn't reachable
+    from this machine, rewrite it before from_pretrained() reads it.
+
+    Returns True if config.json was rewritten.
+    """
+    import json
+    import os
+
+    cfg_path = os.path.join(ckpt_dir, "config.json")
+    if not os.path.exists(cfg_path):
+        return False
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+
+    # Common keys lerobot uses to point at the training dataset
+    keys = ("dataset_repo_id", "dataset_id", "repo_id")
+    changed = False
+    if dataset_repo_id is not None:
+        for k in keys:
+            if k in cfg and cfg[k] != dataset_repo_id:
+                print(f"[ckpt-fix] {cfg_path}: {k}: {cfg[k]!r} -> {dataset_repo_id!r}")
+                cfg[k] = dataset_repo_id
+                changed = True
+    if dataset_root is not None and "dataset_root" in cfg and cfg["dataset_root"] != dataset_root:
+        cfg["dataset_root"] = dataset_root
+        changed = True
+
+    if changed:
+        with open(cfg_path, "w") as f:
+            json.dump(cfg, f, indent=2)
+    return changed
+
+
+def _load_smolvla(path, device, dataset_repo_id=None, dataset_root=None):
     resolved = _resolve_ckpt_path(path, "base_policy_path")
     print(f"[smolvla] resolved ckpt dir: {resolved}")
+    if dataset_repo_id or dataset_root:
+        _override_dataset_in_config(resolved, dataset_repo_id, dataset_root)
     for mod in (
         "lerobot.policies.smolvla.modeling_smolvla",
         "lerobot.common.policies.smolvla.modeling_smolvla",
@@ -167,9 +203,11 @@ def _load_smolvla(path, device):
     raise ImportError("Could not locate SmolVLAPolicy")
 
 
-def _load_residual_policy(path, device):
+def _load_residual_policy(path, device, dataset_repo_id=None, dataset_root=None):
     resolved = _resolve_ckpt_path(path, "residual_policy_path")
     print(f"[a2c2 ] resolved ckpt dir: {resolved}")
+    if dataset_repo_id or dataset_root:
+        _override_dataset_in_config(resolved, dataset_repo_id, dataset_root)
     for mod in (
         "lerobot.policies.residual_transformer.modeling_residual_transformer",
         "lerobot.common.policies.residual_transformer.modeling_residual_transformer",
@@ -214,6 +252,17 @@ class A2C2InferenceConfig:
     home_on_start: bool = True
     no_record: bool = True
     dataset_repo: Optional[str] = None
+
+    # If provided, the policy's normalization stats are pulled from this
+    # dataset (rather than from the ckpt directory or the dataset name
+    # baked into the ckpt's config.json). Use this when the 4090 doesn't
+    # have the original training dataset cached and the policy's
+    # auto-resolution fails with "Repo id must be in the form ...".
+    base_dataset_repo_id: Optional[str] = None
+    residual_dataset_repo_id: Optional[str] = None
+    base_dataset_root: Optional[str] = None
+    residual_dataset_root: Optional[str] = None
+
     device: str = "cuda"
 
 
@@ -381,7 +430,11 @@ def _main(cfg):
 
     # --- base policy (SmolVLA) ---
     print(f"[smolvla] loading {cfg.base_policy_path}")
-    base = _load_smolvla(cfg.base_policy_path, device)
+    base = _load_smolvla(
+        cfg.base_policy_path, device,
+        dataset_repo_id=cfg.base_dataset_repo_id,
+        dataset_root=cfg.base_dataset_root,
+    )
     for p in base.parameters():
         p.requires_grad = False
 
@@ -389,7 +442,11 @@ def _main(cfg):
     residual = None
     if cfg.residual_policy_path:
         print(f"[a2c2 ] loading {cfg.residual_policy_path}")
-        residual = _load_residual_policy(cfg.residual_policy_path, device)
+        residual = _load_residual_policy(
+            cfg.residual_policy_path, device,
+            dataset_repo_id=cfg.residual_dataset_repo_id,
+            dataset_root=cfg.residual_dataset_root,
+        )
         for p in residual.parameters():
             p.requires_grad = False
 
