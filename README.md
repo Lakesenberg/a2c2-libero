@@ -328,6 +328,174 @@ the robot.
 | Robot drifts mid-chunk | The residual head is missing inputs — make sure you're running the latest `inference_test_async` branch (commit ≥ `30e9624`) which passes the full `base_action_chunk` |
 | Action sent during cold start | Expected; engine returns `safe_action` (zeros) for the first ~`H` ticks until SmolVLA produces its first chunk. Pre-position the robot before pressing ENTER |
 
+### 6. lerobot 0.5.1 specifics — robot type names + import layout
+
+The script imports are layout-agnostic (commit `8305c2d`+) and work with
+both legacy and current lerobot. lerobot **0.5.1** in particular has two
+quirks worth flagging:
+
+**6.1 — `RobotConfig` is in `lerobot.robots.config` (singular)**
+
+Older docs sometimes reference `lerobot.robots.configs` (plural) or
+`lerobot.common.robots.config`; in 0.5.1 the canonical path is
+`lerobot.robots.config.RobotConfig`, and `make_robot_from_config` plus
+`RobotConfig` are also re-exported at the top level of `lerobot.robots`.
+The fallback chain in `_import_robot_api()` covers all of these.
+
+**6.2 — Use the new robot-type names, not the legacy SO-100 names**
+
+In lerobot 0.5.1 SO-100 / SO-101 are merged into a single `so_follower`
+subpackage (and the dual-arm variant is `bi_so_follower`). Available
+robot types:
+
+```bash
+python -c "
+import lerobot.robots, pkgutil
+for x in pkgutil.iter_modules(lerobot.robots.__path__):
+    print('  ' + x.name)
+"
+```
+
+```
+bi_openarm_follower    bi_so_follower         earthrover_mini_plus
+hope_jr                koch_follower          lekiwi
+omx_follower           openarm_follower       reachy2
+so_follower            unitree_g1
+```
+
+| Hardware | `--robot-type` | `--action-dim` |
+|---|---|---|
+| SO-100 / SO-101 (single arm) | `so_follower` | `6` |
+| Bi-SO-ARM (dual arm) | `bi_so_follower` | `12` |
+| Koch v1 follower | `koch_follower` | `6` |
+| LeKiwi | `lekiwi` | `9` |
+| OpenArm (single) | `openarm_follower` | `7` |
+| OpenArm (dual) | `bi_openarm_follower` | `14` |
+| Reachy 2 | `reachy2` | `17` |
+
+**Do not pass `so100_follower` or `so101_follower`** — those names don't
+exist in 0.5.1 and the auto-fallback won't find them.
+
+### 7. Concrete inference commands per hardware
+
+#### Single arm (SO-100 / SO-101 / generic `so_follower`)
+
+```bash
+python scripts/realrobot_a2c2_inference.py \
+    --smolvla-path outputs/smolvla_v21 \
+    --head-ckpt    outputs/a2c2_head_v21/model.safetensors \
+    --robot-type   so_follower \
+    --robot-id     <your_id> \
+    --action-dim   6 \
+    --chunk-size   50 \
+    --episodes     3 \
+    --task         "pick up the cup" \
+    --home-on-start \
+    --no-record
+```
+
+#### Dual arm (Bi-SO-ARM)
+
+```bash
+python scripts/realrobot_a2c2_inference.py \
+    --smolvla-path outputs/smolvla_v21 \
+    --head-ckpt    outputs/a2c2_head_v21/model.safetensors \
+    --robot-type   bi_so_follower \
+    --robot-id     <your_id> \
+    --action-dim   12 \
+    --chunk-size   50 \
+    --episodes     3 \
+    --task         "pick up the cup" \
+    --home-on-start \
+    --no-record
+```
+
+When the script starts you should see:
+
+```
+[build_robot] registry import failed (...); falling back to direct per-robot import.
+[robot] so_follower (<your_id>)
+[smolvla] loading outputs/smolvla_v21
+[a2c2 ] loading outputs/a2c2_head_v21/model.safetensors
+```
+
+The `registry import failed ... falling back` line is **expected and
+benign** in lerobot 0.5.1 — the script tries the legacy registry first,
+then auto-imports `lerobot.robots.<robot_type>` directly.
+
+### 8. Pre-flight diagnostic checklist
+
+Before the first real-robot run, paste this into the 4090 terminal — it
+catches all the common breakage in one shot:
+
+```bash
+cd ~/a2c2-libero
+
+echo "=== git ==="
+git rev-parse HEAD
+git log -1 --oneline scripts/realrobot_a2c2_inference.py
+# Latest commit on this file should be >= 8305c2d
+
+echo
+echo "=== lerobot layout ==="
+python -c "
+import lerobot, pkgutil
+print('version:', getattr(lerobot, '__version__', '?'))
+print('path:', lerobot.__file__)
+import lerobot.robots as r
+print('robots exports:', [n for n in dir(r) if not n.startswith('_')])
+print('robot subpackages:')
+for x in pkgutil.iter_modules(r.__path__):
+    print('  ' + x.name)
+"
+
+echo
+echo "=== package importable ==="
+python -c "
+from a2c2_libero.heads import A2C2MLPHead
+from a2c2_libero.inference.a2c2_engine import A2C2Engine
+from a2c2_libero.inference.utils import build_state, sincos_pos_encoding
+print('OK')
+"
+
+echo
+echo "=== ckpts ==="
+find outputs/ -maxdepth 4 -name "model.safetensors"
+find outputs/ -maxdepth 4 -name "config.json"
+
+echo
+echo "=== robot calibration ==="
+ls ~/.cache/huggingface/lerobot/calibration/robots/ 2>/dev/null
+
+echo
+echo "=== gpu ==="
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null
+```
+
+If any line prints an error, see the corresponding section in
+[`docs/DIAGNOSTICS.md`](docs/DIAGNOSTICS.md).
+
+### 9. One-liner: sync everything from latest `inference_test_async`
+
+```bash
+cd ~/a2c2-libero
+git fetch origin inference_test_async
+git checkout origin/inference_test_async -- \
+    scripts/realrobot_a2c2_inference.py \
+    src/a2c2_libero/inference/utils.py \
+    src/a2c2_libero/inference/a2c2_engine.py \
+    docs/DIAGNOSTICS.md \
+    README.md
+```
+
+Or, if you have no local edits, replace your working tree wholesale:
+
+```bash
+cd ~/a2c2-libero
+git fetch origin
+git reset --hard origin/inference_test_async
+```
+
 ---
 
 ## Async timing model
