@@ -106,27 +106,77 @@ def _home_robot(robot, verbose=True):
     return False
 
 
+def _resolve_ckpt_path(path, kind):
+    """Locate a HuggingFace-style checkpoint directory.
+
+    Accepts a local path or HF repo_id. For local paths, also auto-descend
+    into a ``pretrained_model/`` subdirectory if it exists (lerobot saves
+    checkpoints to ``<output_dir>/pretrained_model/`` by default).
+
+    Raises a clear FileNotFoundError listing what was tried, instead of
+    letting HuggingFace fall through to its `Repo id must be in the form
+    'name/repo'` opaque error.
+    """
+    import os
+    candidates = [path]
+    # If the user pointed at the parent dir, auto-descend
+    if not path.endswith("pretrained_model"):
+        candidates.append(os.path.join(path, "pretrained_model"))
+    # Or `outputs/<run>/checkpoints/<step>/pretrained_model`
+    candidates.append(os.path.join(path, "checkpoints", "last", "pretrained_model"))
+
+    expected_files = ("config.json",)
+    for c in candidates:
+        if os.path.isdir(c) and all(os.path.exists(os.path.join(c, f))
+                                    for f in expected_files):
+            return c
+
+    # Maybe it's a HF Hub repo_id (must be 'namespace/name'-shaped)
+    if "/" in path and not os.path.isabs(path) and not os.path.exists(path):
+        # let HF resolve it remotely
+        return path
+
+    raise FileNotFoundError(
+        f"[{kind}] could not find a valid checkpoint directory.\n"
+        f"  --{kind.replace('_', '-')}={path!r}\n"
+        f"  tried: {candidates}\n"
+        f"  Expected a directory that contains at least 'config.json' "
+        f"(and 'model.safetensors' / 'pytorch_model.bin' for weights).\n"
+        f"  Common causes:\n"
+        f"    - typo in the path\n"
+        f"    - you pointed at the parent of pretrained_model/ "
+        f"(this script auto-descends but only one level)\n"
+        f"    - ckpt not actually scp'd to the 4090 yet — run\n"
+        f"        ls -la {path}\n"
+        f"      and confirm there's a config.json + model.safetensors"
+    )
+
+
 def _load_smolvla(path, device):
+    resolved = _resolve_ckpt_path(path, "base_policy_path")
+    print(f"[smolvla] resolved ckpt dir: {resolved}")
     for mod in (
         "lerobot.policies.smolvla.modeling_smolvla",
         "lerobot.common.policies.smolvla.modeling_smolvla",
     ):
         try:
             SmolVLAPolicy = __import__(mod, fromlist=["SmolVLAPolicy"]).SmolVLAPolicy
-            return SmolVLAPolicy.from_pretrained(path).to(device).eval()
+            return SmolVLAPolicy.from_pretrained(resolved).to(device).eval()
         except (ImportError, AttributeError):
             continue
     raise ImportError("Could not locate SmolVLAPolicy")
 
 
 def _load_residual_policy(path, device):
+    resolved = _resolve_ckpt_path(path, "residual_policy_path")
+    print(f"[a2c2 ] resolved ckpt dir: {resolved}")
     for mod in (
         "lerobot.policies.residual_transformer.modeling_residual_transformer",
         "lerobot.common.policies.residual_transformer.modeling_residual_transformer",
     ):
         try:
             cls = __import__(mod, fromlist=["ResidualTransformerPolicy"])
-            return cls.ResidualTransformerPolicy.from_pretrained(path).to(device).eval()
+            return cls.ResidualTransformerPolicy.from_pretrained(resolved).to(device).eval()
         except (ImportError, AttributeError):
             continue
     raise ImportError(
