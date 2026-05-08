@@ -77,6 +77,35 @@ for _finder, _name, _ in _pkgutil.iter_modules(_lr_robots.__path__):
 from lerobot.robots import RobotConfig, make_robot_from_config
 
 
+def _home_robot(robot, verbose=True):
+    """Best-effort 'go to home pose' across lerobot API versions.
+
+    lerobot 0.5+ dropped the `home()` method on the per-robot classes
+    in favor of the more general `lerobot-calibrate` flow + sending an
+    explicit zero-pose action. Try a few common method names; if none
+    exist, print a warning and let the user pre-position the robot.
+    """
+    candidates = ("home", "go_home", "move_to_home_position", "reset",
+                  "return_to_home", "move_home")
+    for name in candidates:
+        fn = getattr(robot, name, None)
+        if callable(fn):
+            try:
+                fn()
+                if verbose:
+                    print(f"[robot] homed via {name}()")
+                return True
+            except Exception as e:
+                if verbose:
+                    print(f"[robot] {name}() raised {type(e).__name__}: {e}; "
+                          f"trying next candidate.")
+    if verbose:
+        print("[robot] no home() / go_home() / move_to_home_position() etc. "
+              "exposed by this robot class; please pre-position the arm "
+              "manually before pressing ENTER.")
+    return False
+
+
 def _load_smolvla(path, device):
     for mod in (
         "lerobot.policies.smolvla.modeling_smolvla",
@@ -298,8 +327,7 @@ def _main(cfg):
             f"--robot.id={cfg.robot.id}` first."
         )
     if cfg.home_on_start:
-        print("[robot] homing ...")
-        robot.home()
+        _home_robot(robot)
 
     # --- base policy (SmolVLA) ---
     print(f"[smolvla] loading {cfg.base_policy_path}")
@@ -343,8 +371,10 @@ def _main(cfg):
             if stop_signal["flag"]:
                 break
     finally:
-        try: robot.home()
-        except Exception: pass
+        try:
+            _home_robot(robot, verbose=False)
+        except Exception:
+            pass
         robot.disconnect()
 
     n_succ = sum(int(m["success"]) for m in metrics)
