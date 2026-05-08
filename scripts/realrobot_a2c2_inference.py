@@ -1,486 +1,379 @@
-"""Real-robot A2C2 inference on bi-SO-ARM (or any LeRobot robot).
+"""Real-robot A2C2 inference following the lerobot + k1000dai/a2c2-libero
+canonical pattern.
 
-Bypasses lerobot-rollout / inference factory. Loads SmolVLA + the residual
-transformer A2C2 head directly, drives the robot at the highest tick rate
-it supports, and records to a LeRobot dataset.
+CLI structure mirrors `lerobot-record` / `lerobot-rollout`: the top-level
+@parser.wrap()'d dataclass embeds a `robot: RobotConfig` field, so all
+`--robot.*` (including `--robot.cameras='{...}'`) works automatically via
+draccus, identical to upstream lerobot. No ad-hoc port / camera flags.
 
-The script feeds the residual head the same fields used at training time
-in ``src/lerobot/scripts/train_residual_transformer.py``:
+Inference loop matches `eval_libero/evaluation_libero.py` (lines 230-310):
 
-* ``action``             - single-step base action to execute this tick
-* ``base_action_chunk``  - the FULL chunk produced by SmolVLA at chunk start
-* ``time_feature``       - sin/cos of the chunk index (k / H)
-* ``vlm_hidden``         - cached VLM latent at chunk start
-* ``observation.*``      - current observation
+    base_policy.predict_action_chunk(observation)         -> (1, T, A)
+    vlm_hidden  = base_policy.vlm_hidden                  # cached on policy
+    observation["action"]            = base_chunk[:, 0]   # current step
+    observation["base_action_chunk"] = base_chunk         # full chunk
+    observation["time_feature"]      = sin/cos of (k mod T)
+    observation["vlm_hidden"]        = vlm_hidden[k]
+    delta = residual_policy.predict_action_chunk(observation)[:, 0]
+    a_exec = base_chunk[:, 0] + delta
 
-Without ``base_action_chunk`` and ``time_feature`` the residual transformer
-falls back to base-action-only mode and refinement quality drops; see
-upstream README at https://github.com/k1000dai/a2c2-libero .
+Example usage (single SO-100 + one camera + one wrist camera):
 
-Usage:
-    python scripts/realrobot_a2c2_inference.py \
-        --smolvla-path Lakesenberg/smolvla_libero \
-        --head-ckpt   outputs/a2c2_libero_10/checkpoint.pt \
-        --robot-id    my_so_follower \
-        --episodes    20 \
-        --task        "pick the cup" \
-        --dataset-repo Lakesenberg/realrobot_a2c2_eval
+    python scripts/realrobot_a2c2_inference.py \\
+        --robot.type=so100_follower \\
+        --robot.port=/dev/ttyACM0 \\
+        --robot.id=my_arm \\
+        --robot.cameras='{image: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, wrist_image: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}' \\
+        --base-policy-path=outputs/smolvla_v21 \\
+        --residual-policy-path=outputs/a2c2_head_v21 \\
+        --task='pick up the cup' \\
+        --episodes=3 \\
+        --no-record
 
-Press 'q' (in the cv2 window) to abort current episode.
-Ctrl-C from terminal stops everything safely.
+Bi-SO-ARM (dual arm): swap `--robot.type=bi_so_follower` and supply
+`--robot.left_arm_port=/dev/ttyACM0 --robot.right_arm_port=/dev/ttyACM1`
+plus the corresponding cameras.
 """
 from __future__ import annotations
 
-import argparse
+import math
 import signal
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from a2c2_libero.heads import A2C2MLPHead
-from a2c2_libero.inference.a2c2_engine import A2C2Engine
-from a2c2_libero.inference.utils import LatentHook
-
 
 # --------------------------------------------------------------------------- #
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--smolvla-path", required=True,
-                   help="HF repo or local path of trained SmolVLA")
-    p.add_argument("--head-ckpt", required=True,
-                   help="local path to trained A2C2 head .pt")
-    p.add_argument("--head-input-dim", type=int, default=None,
-                   help="inferred from first build_state if omitted")
-    p.add_argument("--robot-type", default="bi_so_follower")
-    p.add_argument("--robot-id", required=True)
-    p.add_argument("--port", default=None,
-                   help="Serial port for the motor bus (e.g. /dev/ttyACM0). "
-                        "Required by lerobot 0.5+ SO-family configs. If "
-                        "omitted the script will look up the calibration "
-                        "file at ~/.cache/huggingface/lerobot/calibration/"
-                        "robots/<robot_type>/<robot_id>.json")
-    p.add_argument("--port-left", default=None,
-                   help="Bi-arm only: left-arm serial port")
-    p.add_argument("--port-right", default=None,
-                   help="Bi-arm only: right-arm serial port")
-    p.add_argument("--cameras-config", default=None,
-                   help="JSON string for cameras, or use robot defaults")
-    p.add_argument("--extra-config-kwargs", default=None,
-                   help="JSON string of additional kwargs to pass to the "
-                        "robot Config dataclass, e.g. "
-                        "'{\"max_relative_target\": 5}'")
-    p.add_argument("--action-dim", type=int, default=12,
-                   help="bi-SO-ARM = 12 (6+6); single arm = 6 or 7")
-    p.add_argument("--chunk-size", type=int, default=50)
-    p.add_argument("--episodes", type=int, default=10)
-    p.add_argument("--max-episode-steps", type=int, default=600)
-    p.add_argument("--tick-dt-ms", type=float, default=5.0)
-    p.add_argument("--task", default="pick up the object")
-    p.add_argument("--dataset-repo", default=None,
-                   help="if given, record episodes to this LeRobot dataset")
-    p.add_argument("--home-on-start", action="store_true")
-    p.add_argument("--no-record", action="store_true")
-    return p.parse_args()
-
-
+# Imports lerobot (layout-agnostic helpers)
 # --------------------------------------------------------------------------- #
-def _import_robot_api():
-    """Locate (make_robot_from_config, RobotConfig) across lerobot layouts."""
-    candidates = [
-        ("lerobot.robots", "make_robot_from_config", "lerobot.robots.configs", "RobotConfig"),
-        ("lerobot.robots", "make_robot_from_config", "lerobot.robots.config", "RobotConfig"),
-        ("lerobot.robots.utils", "make_robot_from_config", "lerobot.robots.configs", "RobotConfig"),
-        ("lerobot.common.robots", "make_robot_from_config", "lerobot.common.robots.configs", "RobotConfig"),
-        ("lerobot.common.robots", "make_robot_from_config", "lerobot.common.robots.config", "RobotConfig"),
-        ("lerobot.robots", "make_robot", "lerobot.robots.configs", "RobotConfig"),
-        ("lerobot.common.robots", "make_robot", "lerobot.common.robots.config", "RobotConfig"),
-    ]
-    last_error = None
-    for builder_mod, builder_name, cfg_mod, cfg_name in candidates:
+def _import_lerobot():
+    """Resolve the lerobot bits we need across slightly different layouts."""
+    from lerobot.robots import RobotConfig, make_robot_from_config
+
+    # Some forks expose policy classes under different module paths; try both.
+    SmolVLAPolicy = None
+    for mod in (
+        "lerobot.policies.smolvla.modeling_smolvla",
+        "lerobot.common.policies.smolvla.modeling_smolvla",
+    ):
         try:
-            mb = __import__(builder_mod, fromlist=[builder_name])
-            mc = __import__(cfg_mod, fromlist=[cfg_name])
-            return getattr(mb, builder_name), getattr(mc, cfg_name)
-        except (ImportError, AttributeError) as e:
-            last_error = e
-    raise ImportError(
-        "Could not locate lerobot robot factory. Tried:\n  "
-        + "\n  ".join(f"{m}.{n} + {c}.{r}" for m, n, c, r in candidates)
-        + f"\nLast error: {last_error}"
-    )
-
-
-def _config_kwargs_from_args(args, config_cls):
-    """Build the kwargs dict for a robot Config dataclass from CLI args.
-
-    Handles required fields (port, port_left, port_right) by inspecting
-    the dataclass fields, and accepts a free-form JSON via
-    ``--extra-config-kwargs`` to forward whatever the user wants.
-    """
-    import dataclasses
-    import json
-
-    field_names = set()
-    if dataclasses.is_dataclass(config_cls):
-        field_names = {f.name for f in dataclasses.fields(config_cls)}
-
-    kwargs: dict = {"id": args.robot_id}
-    # Single-arm port
-    if "port" in field_names:
-        if args.port is None:
-            raise ValueError(
-                f"{config_cls.__name__} requires `port` (e.g. /dev/ttyACM0). "
-                "Pass it via --port=/dev/ttyACM0."
-            )
-        kwargs["port"] = args.port
-    # Bi-arm ports
-    if "left_arm_port" in field_names or "port_left" in field_names:
-        port_field = "left_arm_port" if "left_arm_port" in field_names else "port_left"
-        if args.port_left is None:
-            raise ValueError(
-                f"{config_cls.__name__} requires `{port_field}`. "
-                "Pass it via --port-left=/dev/ttyACM0."
-            )
-        kwargs[port_field] = args.port_left
-    if "right_arm_port" in field_names or "port_right" in field_names:
-        port_field = "right_arm_port" if "right_arm_port" in field_names else "port_right"
-        if args.port_right is None:
-            raise ValueError(
-                f"{config_cls.__name__} requires `{port_field}`. "
-                "Pass it via --port-right=/dev/ttyACM1."
-            )
-        kwargs[port_field] = args.port_right
-
-    # User-supplied free-form kwargs (e.g. {"max_relative_target": 5})
-    if args.extra_config_kwargs:
-        try:
-            extra = json.loads(args.extra_config_kwargs)
-        except json.JSONDecodeError as e:
-            raise SystemExit(
-                f"[build_robot] --extra-config-kwargs is not valid JSON.\n"
-                f"  raw value: {args.extra_config_kwargs!r}\n"
-                f"  error: {e}\n"
-                f"  hint: wrap the JSON in single quotes so bash keeps the "
-                f"double quotes intact, e.g.\n"
-                f"    --extra-config-kwargs '{{\"max_relative_target\": 5}}'"
-            )
-        if not isinstance(extra, dict):
-            raise SystemExit(
-                f"[build_robot] --extra-config-kwargs must be a JSON object "
-                f"(dict), got {type(extra).__name__}: {extra!r}"
-            )
-        for k, v in extra.items():
-            kwargs[k] = v
-
-    # Drop kwargs that aren't valid fields (avoid TypeError) — keep `id`
-    # and any required positional we just set.
-    if field_names:
-        kwargs = {k: v for k, v in kwargs.items() if k in field_names}
-    return kwargs
-
-
-def _build_robot_direct(args):
-    """Import the robot class + config directly from `lerobot.robots.<robot_type>`.
-
-    Matches the lerobot 0.5+ layout where each robot ships its own
-    subpackage exporting a robot class plus a config dataclass. Detection
-    is case-insensitive to handle both ``SOFollower`` (acronym style) and
-    ``SoFollower`` (Pascal style).
-    """
-    import importlib
-
-    sub = args.robot_type
-    try:
-        mod = importlib.import_module(f"lerobot.robots.{sub}")
-    except ImportError as e:
-        raise ImportError(
-            f"lerobot.robots.{sub} not importable. Make sure the robot "
-            f"package is installed and `--robot-type` matches the "
-            f"submodule name."
-        ) from e
-
-    # Build a normalized form of the robot-type string for matching.
-    norm = sub.replace("_", "").lower()      # e.g. "sofollower"
-    candidates_by_kind: dict[str, list[type]] = {"robot": [], "config": []}
-    for name in dir(mod):
-        if name.startswith("_"):
-            continue
-        obj = getattr(mod, name)
-        if not isinstance(obj, type):
-            continue
-        nname = name.replace("_", "").lower()
-        if "config" in nname and norm in nname:
-            candidates_by_kind["config"].append(obj)
-        elif norm in nname and "config" not in nname:
-            candidates_by_kind["robot"].append(obj)
-
-    # Prefer the most specific match (longest class name) to avoid e.g.
-    # picking up a base class.
-    config_cls = (
-        max(candidates_by_kind["config"], key=lambda c: len(c.__name__))
-        if candidates_by_kind["config"] else None
-    )
-    robot_cls = (
-        max(candidates_by_kind["robot"], key=lambda c: len(c.__name__))
-        if candidates_by_kind["robot"] else None
-    )
-
-    if robot_cls is None or config_cls is None:
-        raise ImportError(
-            f"Could not auto-detect robot class / config in lerobot.robots.{sub}. "
-            f"Exports: {[n for n in dir(mod) if not n.startswith('_')]}"
-        )
-
-    kwargs = _config_kwargs_from_args(args, config_cls)
-    cfg = config_cls(**kwargs)
-    if args.cameras_config:
-        import json
-        try:
-            cfg.cameras = json.loads(args.cameras_config)
-        except json.JSONDecodeError as e:
-            raise SystemExit(
-                f"[build_robot] --cameras-config is not valid JSON.\n"
-                f"  raw value: {args.cameras_config!r}\n"
-                f"  error: {e}\n"
-                f"  hint: wrap the JSON in single quotes so bash keeps the "
-                f"double quotes intact, e.g.\n"
-                f"    --cameras-config '{{\"main\": {{\"type\": \"opencv\", "
-                f"\"index_or_path\": 0}}}}'"
-            )
-    print(f"[build_robot] direct import: {robot_cls.__name__}({config_cls.__name__})")
-    print(f"[build_robot] config kwargs: {kwargs}")
-    return robot_cls(cfg)
-
-
-def build_robot(args):
-    """Construct a LeRobot robot wrapper, layout-agnostic.
-
-    Strategy:
-      1. Try direct per-robot import first (lerobot.robots.<robot_type>).
-         This is the most robust path on lerobot 0.5+ where the abstract
-         RobotConfig no longer accepts `type=` as a kwarg (it's a draccus
-         discriminator field on the union of subclasses).
-      2. Fall back to the registry-style ``make_robot_from_config`` only
-         if direct import fails.
-    """
-    # 1. Direct path — works on 0.5.1, 0.4.x and the fork.
-    try:
-        return _build_robot_direct(args)
-    except ImportError as direct_err:
-        print(f"[build_robot] direct import failed ({direct_err}); "
-              "trying registry path.")
-
-    # 2. Registry fallback (legacy / draccus-aware).
-    make_robot_from_config, RobotConfig = _import_robot_api()
-    cfg = None
-    # 2a. draccus-style decode (lerobot 0.5+).
-    try:
-        import draccus
-        cfg_dict = {"type": args.robot_type, "id": args.robot_id}
-        cfg = draccus.decode(cfg_dict, RobotConfig)
-    except Exception:
-        pass
-    # 2b. classmethod from_kwargs (older fork).
-    if cfg is None and hasattr(RobotConfig, "from_kwargs"):
-        try:
-            cfg = RobotConfig.from_kwargs(type=args.robot_type, id=args.robot_id)
-        except Exception:
-            pass
-    # 2c. Last-ditch: positional / kwargs construction (legacy).
-    if cfg is None:
-        try:
-            cfg = RobotConfig(type=args.robot_type, id=args.robot_id)
-        except TypeError:
-            cfg = RobotConfig(id=args.robot_id)
-
-    if args.cameras_config:
-        import json
-        cfg.cameras = json.loads(args.cameras_config)
-    return make_robot_from_config(cfg)
-
-
-def _import_smolvla():
-    """Locate SmolVLAPolicy across lerobot layouts."""
-    for mod in ("lerobot.policies.smolvla.modeling_smolvla",
-                "lerobot.common.policies.smolvla.modeling_smolvla"):
-        try:
-            m = __import__(mod, fromlist=["SmolVLAPolicy"])
-            return m.SmolVLAPolicy
+            SmolVLAPolicy = __import__(mod, fromlist=["SmolVLAPolicy"]).SmolVLAPolicy
+            break
         except (ImportError, AttributeError):
             continue
-    raise ImportError(
-        "Could not locate SmolVLAPolicy. Tried "
-        "lerobot.policies.smolvla.modeling_smolvla and "
-        "lerobot.common.policies.smolvla.modeling_smolvla."
-    )
+    if SmolVLAPolicy is None:
+        raise ImportError("Could not locate SmolVLAPolicy")
+
+    # ResidualTransformerPolicy lives in the fork; load lazily so the script
+    # is still usable for SmolVLA-only baseline runs (residual_policy_path=None).
+    def _load_residual(path: str):
+        for mod in (
+            "lerobot.policies.residual_transformer.modeling_residual_transformer",
+            "lerobot.common.policies.residual_transformer.modeling_residual_transformer",
+        ):
+            try:
+                cls = __import__(mod, fromlist=["ResidualTransformerPolicy"])
+                return cls.ResidualTransformerPolicy.from_pretrained(path)
+            except (ImportError, AttributeError):
+                continue
+        raise ImportError(
+            "ResidualTransformerPolicy not found. The fork that adds this "
+            "policy must be importable as lerobot.policies.residual_transformer "
+            "(or lerobot.common.policies.residual_transformer)."
+        )
+
+    return RobotConfig, make_robot_from_config, SmolVLAPolicy, _load_residual
 
 
-def load_smolvla(path: str, device: torch.device):
-    SmolVLAPolicy = _import_smolvla()
-    p = SmolVLAPolicy.from_pretrained(path).to(device).eval()
-    for prm in p.parameters():
-        prm.requires_grad = False
-    return p
+def _import_parser_wrap():
+    """Locate lerobot's draccus wrapper. Falls back to plain draccus.parse."""
+    try:
+        from lerobot.configs.parser import wrap as parser_wrap
+        return parser_wrap
+    except ImportError:
+        try:
+            from lerobot.common.configs.parser import wrap as parser_wrap
+            return parser_wrap
+        except ImportError:
+            pass
+    # Fallback: build our own decorator on top of draccus.parse_known_args
+    import draccus
+
+    def parser_wrap(*_a, **_k):
+        def _decorator(fn):
+            def _runner():
+                # Resolve the dataclass type from the callable's annotations.
+                import inspect
+                sig = inspect.signature(fn)
+                cfg_type = next(iter(sig.parameters.values())).annotation
+                cfg = draccus.parse(config_class=cfg_type)
+                return fn(cfg)
+            return _runner
+        return _decorator
+    return parser_wrap
+
+
+RobotConfig, make_robot_from_config, _SmolVLAPolicyLazy, _load_residual_policy = (
+    None, None, None, None
+)
+parser_wrap = None
 
 
 # --------------------------------------------------------------------------- #
-def main():
-    args = parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Top-level config (draccus dataclass)
+# --------------------------------------------------------------------------- #
+@dataclass
+class A2C2InferenceConfig:
+    # Embedded robot config — `--robot.type=...` / `--robot.cameras={...}`
+    # / `--robot.port=...` all flow through this field via draccus, exactly
+    # the same way lerobot-record / lerobot-rollout work.
+    robot: "RobotConfig" = None  # type: ignore  # filled in main()
 
-    # ----- robot -----
-    robot = build_robot(args)
-    print(f"[robot] {args.robot_type} ({args.robot_id})")
+    # Policy paths
+    base_policy_path: str = ""
+    residual_policy_path: str | None = None
+
+    # Inference parameters
+    chunk_size: int = 50
+    action_dim: int = 6
+    task: str = "do the task"
+    episodes: int = 3
+    max_episode_steps: int = 600
+    tick_dt_ms: float = 5.0
+    home_on_start: bool = True
+
+    # Recording
+    no_record: bool = True
+    dataset_repo: str | None = None
+
+    # Misc
+    device: str = "cuda"
+
+
+# --------------------------------------------------------------------------- #
+# A2C2 inference engine
+# --------------------------------------------------------------------------- #
+class A2C2Inferencer:
+    """Per-tick A2C2 inference matching evaluation_libero.py:230-310.
+
+    Notes:
+      - SmolVLA stashes its VLM hidden state on the policy/instance after
+        `predict_action_chunk(...)`. We read it back from
+        `policy.vlm_hidden` (or `policy.model.vlm_hidden`) instead of using
+        a forward hook — this is the exact approach upstream uses.
+      - Chunks are predicted at the start of every chunk window (every
+        `chunk_size` ticks). Within a chunk we only run the residual head.
+    """
+
+    def __init__(
+        self,
+        base_policy,
+        residual_policy,
+        chunk_size: int,
+        action_dim: int,
+        device: torch.device,
+    ) -> None:
+        self.base = base_policy
+        self.residual = residual_policy
+        self.H = chunk_size
+        self.A = action_dim
+        self.device = device
+        self.reset()
+
+    def reset(self) -> None:
+        self._chunk: torch.Tensor | None = None       # (T, A) on device
+        self._vlm_hidden: torch.Tensor | None = None  # (T, ...) on device
+        self._k: int = 0
+
+    @torch.no_grad()
+    def step(self, observation: dict, task: str) -> torch.Tensor:
+        """Run one control tick. Returns (action_dim,) tensor on CPU."""
+        if self._chunk is None or self._k >= self.H:
+            self._refresh_chunk(observation, task)
+
+        k = self._k
+        base_step = self._chunk[k]                  # (A,)
+        observation = dict(observation)             # don't mutate caller's
+        observation["task"] = task
+        observation["action"] = base_step.unsqueeze(0)                # (1, A)
+        observation["base_action_chunk"] = self._chunk.unsqueeze(0)   # (1, T, A)
+
+        # Sin/cos chunk-index encoding (line 285-289 of evaluation_libero.py)
+        phase = 2.0 * math.pi * (k % self.H) / max(self.H - 1, 1)
+        observation["time_feature"] = torch.tensor(
+            [[math.sin(phase), math.cos(phase)]],
+            dtype=torch.float32, device=self.device,
+        )
+
+        if self._vlm_hidden is not None:
+            entry = self._vlm_hidden[k] if self._vlm_hidden.ndim >= 2 else self._vlm_hidden
+            observation["vlm_hidden"] = entry.unsqueeze(0).to(self.device)
+
+        if self.residual is None:
+            a_exec = base_step
+        else:
+            corrected_chunk = self.residual.predict_action_chunk(observation)
+            corrected_chunk = corrected_chunk.squeeze(0).cpu()        # (T, A)
+            # Residual head outputs the corrected action directly (matches
+            # a2c2-libero evaluation: `updated_action = ...[0]`); no need
+            # to add it back to base_step.
+            a_exec = corrected_chunk[0].to(self.device)
+
+        self._k += 1
+        return a_exec.cpu()
+
+    def _refresh_chunk(self, observation: dict, task: str) -> None:
+        observation = dict(observation)
+        observation["task"] = task
+        chunk = self.base.predict_action_chunk(observation)            # (1, T, A)
+        self._chunk = chunk.squeeze(0).to(self.device)
+
+        # Pull the cached VLM hidden state (k1000dai pattern, line 244-247).
+        vh = getattr(self.base, "vlm_hidden", None)
+        if vh is None and hasattr(self.base, "model"):
+            vh = getattr(self.base.model, "vlm_hidden", None)
+        if vh is not None:
+            self._vlm_hidden = vh.detach()
+        self._k = 0
+
+
+# --------------------------------------------------------------------------- #
+# Episode loop
+# --------------------------------------------------------------------------- #
+def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
+                episode_idx: int) -> dict:
+    """Drive one episode end-to-end. Returns metrics dict."""
+    inferencer.reset()
+    obs = robot.get_observation()
+    obs_t = {k: torch.as_tensor(v).to(cfg.device) for k, v in obs.items()
+             if isinstance(v, (np.ndarray, torch.Tensor))}
+
+    tick_dt = cfg.tick_dt_ms / 1000.0
+    latencies: list[float] = []
+    for tick in range(cfg.max_episode_steps):
+        t0 = time.perf_counter()
+        action = inferencer.step(obs_t, cfg.task)
+        elapsed = (time.perf_counter() - t0) * 1000
+        latencies.append(elapsed)
+
+        action_np = action.cpu().numpy().astype(np.float32)
+        robot.send_action(action_np)
+
+        if tick_dt > 0:
+            sleep_for = tick_dt - (time.perf_counter() - t0)
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+
+        # Refresh observation (re-read sensors)
+        obs = robot.get_observation()
+        obs_t = {k: torch.as_tensor(v).to(cfg.device) for k, v in obs.items()
+                 if isinstance(v, (np.ndarray, torch.Tensor))}
+
+    succ_str = input(
+        f"[ep {episode_idx + 1}/{cfg.episodes}] success? [y/N] "
+    ).strip().lower()
+    success = succ_str.startswith("y")
+    return {
+        "episode": episode_idx,
+        "success": success,
+        "ticks": cfg.max_episode_steps,
+        "tick_latency_ms": {
+            "mean": float(np.mean(latencies)) if latencies else 0.0,
+            "p99":  float(np.percentile(latencies, 99)) if latencies else 0.0,
+        },
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Main entry point
+# --------------------------------------------------------------------------- #
+def _main(cfg: A2C2InferenceConfig) -> None:
+    global RobotConfig, make_robot_from_config, _SmolVLAPolicyLazy, _load_residual_policy
+    RobotConfig, make_robot_from_config, _SmolVLAPolicyLazy, _load_residual_policy = _import_lerobot()
+
+    if not cfg.base_policy_path:
+        raise SystemExit("--base-policy-path is required")
+
+    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+
+    # --- robot ---
+    print(f"[robot] type={cfg.robot.type}, id={cfg.robot.id}")
+    robot = make_robot_from_config(cfg.robot)
     robot.connect()
     if not robot.is_calibrated:
         raise RuntimeError(
-            f"robot {args.robot_id} not calibrated. Run: "
-            f"lerobot-calibrate --robot.type={args.robot_type} --robot.id={args.robot_id}"
+            f"Robot {cfg.robot.id!r} is not calibrated. Run "
+            f"`lerobot-calibrate --robot.type={cfg.robot.type} "
+            f"--robot.id={cfg.robot.id}` first."
         )
-    if args.home_on_start:
+    if cfg.home_on_start:
         print("[robot] homing ...")
         robot.home()
 
-    # ----- SmolVLA + latent hook -----
-    print(f"[smolvla] loading {args.smolvla_path}")
-    smolvla = load_smolvla(args.smolvla_path, device)
-    # Hook depending on backbone layout; adjust for your SmolVLA version.
-    backbone_last = (
-        getattr(getattr(smolvla, "model", smolvla), "vlm_backbone", None)
-    )
-    if backbone_last is None:
-        raise RuntimeError(
-            "could not locate SmolVLA backbone for latent hook; please patch "
-            "scripts/realrobot_a2c2_inference.py to point at your version"
-        )
-    if hasattr(backbone_last, "layers") and len(backbone_last.layers) > 0:
-        hook = LatentHook(backbone_last.layers[-1])
-    else:
-        hook = LatentHook(backbone_last)
+    # --- base policy (SmolVLA) ---
+    print(f"[smolvla] loading {cfg.base_policy_path}")
+    base = _SmolVLAPolicyLazy.from_pretrained(cfg.base_policy_path).to(device).eval()
+    for p in base.parameters():
+        p.requires_grad = False
 
-    @torch.no_grad()
-    def smolvla_fn(obs, language):
-        chunk = smolvla.predict_action_chunk(obs)
-        z = hook.latest
-        if z is None:
-            raise RuntimeError("LatentHook produced no latent; check hook target")
-        return chunk[0].to(device), z[0].to(device)
+    # --- residual head ---
+    residual = None
+    if cfg.residual_policy_path:
+        print(f"[a2c2 ] loading {cfg.residual_policy_path}")
+        residual = _load_residual_policy(cfg.residual_policy_path).to(device).eval()
+        for p in residual.parameters():
+            p.requires_grad = False
 
-    # ----- A2C2 head -----
-    print(f"[a2c2 ] loading {args.head_ckpt}")
-    head_state = torch.load(args.head_ckpt, map_location=device)
-    if isinstance(head_state, dict) and "input_dim" in head_state:
-        in_dim = head_state["input_dim"]
-        head_state = head_state["state_dict"]
-    elif args.head_input_dim is not None:
-        in_dim = args.head_input_dim
-    else:
-        # Fallback: probe from a synthetic state once
-        from a2c2_libero.inference.utils import build_state, flatten_state_for_mlp
-        sample = robot.get_observation()
-        s = build_state(
-            obs={k: torch.as_tensor(v, device=device).unsqueeze(0) for k, v in sample.items()
-                 if isinstance(v, (np.ndarray, torch.Tensor))},
-            a_base=torch.zeros(args.action_dim, device=device),
-            tau_k=torch.zeros(2, device=device),
-            z=torch.zeros(384, device=device),
-        )
-        in_dim = flatten_state_for_mlp(s).shape[-1]
-        print(f"[a2c2 ] inferred head input_dim = {in_dim}")
-
-    head = A2C2MLPHead(input_dim=in_dim, action_dim=args.action_dim).to(device).eval()
-    head.load_state_dict(head_state)
-
-    @torch.no_grad()
-    def head_fn(state):
-        return head(state)
-
-    # ----- A2C2 engine -----
-    engine = A2C2Engine(
-        smolvla_fn=smolvla_fn,
-        head_fn=head_fn,
-        chunk_size=args.chunk_size,
-        action_dim=args.action_dim,
+    inferencer = A2C2Inferencer(
+        base_policy=base,
+        residual_policy=residual,
+        chunk_size=cfg.chunk_size,
+        action_dim=cfg.action_dim,
         device=device,
     )
-    engine.start_async()
 
-    # ----- recording -----
-    dataset = None
-    if args.dataset_repo and not args.no_record:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-        dataset = LeRobotDataset.create(
-            repo_id=args.dataset_repo,
-            features=robot.observation_features | robot.action_features
-                     | {"intervention": {"dtype": "bool", "shape": (1,)}},
-            fps=int(1000 / args.tick_dt_ms),
-        )
-        print(f"[record] new dataset: {args.dataset_repo}")
-
-    # ----- safety: ctrl-c safe stop -----
+    # --- ctrl-c safety ---
     stop_signal = {"flag": False}
-    def _on_sigint(signum, frame):
-        print("\n[abort] ctrl-c, stopping after current episode")
+    def _on_sigint(*_):
+        print("\n[abort] ctrl-c, finishing current episode then stopping.")
         stop_signal["flag"] = True
     signal.signal(signal.SIGINT, _on_sigint)
 
-    # ====================================================================== #
-    # main loop
-    # ====================================================================== #
-    successes = 0
+    # --- episode loop ---
+    metrics = []
     try:
-        for ep in range(args.episodes):
-            print(f"\n========== episode {ep+1}/{args.episodes} ==========")
-            engine.reset(); engine.start_async()
-            input("place objects, press ENTER to start (or ctrl-c to abort)...")
-
-            ep_start = time.monotonic()
-            tick_dt = args.tick_dt_ms / 1000.0
-            for tick in range(args.max_episode_steps):
-                t0 = time.perf_counter()
-                obs = robot.get_observation()
-                obs_t = {k: torch.as_tensor(v, device=device)
-                         for k, v in obs.items()
-                         if isinstance(v, (np.ndarray, torch.Tensor))}
-                action = engine.step_async(obs_t, language=args.task)
-                action_np = action.cpu().numpy().astype(np.float32)
-                robot.send_action(action_np)
-
-                if dataset is not None:
-                    frame = {**obs, "action": action_np,
-                             "intervention": np.array([False])}
-                    dataset.add_frame(frame, task=args.task)
-
-                # pace to target tick rate
-                elapsed = time.perf_counter() - t0
-                if elapsed < tick_dt:
-                    time.sleep(tick_dt - elapsed)
-
-                if stop_signal["flag"]:
-                    break
-
-            ep_dur = time.monotonic() - ep_start
-            ans = input(f"episode took {ep_dur:.1f}s. success? [y/N] ").strip().lower()
-            ok = ans == "y"
-            successes += int(ok)
-            print(f"[ep {ep+1}] success={ok}  ({successes}/{ep+1})")
-
-            if dataset is not None:
-                dataset.save_episode()
-
+        for ep in range(cfg.episodes):
+            print(f"\n========== episode {ep + 1}/{cfg.episodes} ==========")
+            input("place objects, press ENTER to start...")
+            result = run_episode(robot, inferencer, cfg, ep)
+            metrics.append(result)
+            print(f"  success={result['success']} "
+                  f"latency p99={result['tick_latency_ms']['p99']:.2f} ms")
             if stop_signal["flag"]:
                 break
-
     finally:
-        engine.stop_async()
-        try:
-            robot.home()
-        except Exception:
-            pass
+        try: robot.home()
+        except Exception: pass
         robot.disconnect()
-        print(f"\n=== final: {successes}/{ep+1 if 'ep' in dir() else 0} episodes succeeded ===")
+
+    n_succ = sum(int(m["success"]) for m in metrics)
+    print(f"\n=== final: {n_succ}/{len(metrics)} episodes succeeded ===")
+
+
+def main() -> None:
+    """Entry point. Resolves the parser wrapper at call time so the
+    @decorator on `_main` references the right thing."""
+    global parser_wrap
+    parser_wrap = _import_parser_wrap()
+
+    @parser_wrap()
+    def _wrapped(cfg: A2C2InferenceConfig):
+        _main(cfg)
+
+    _wrapped()
 
 
 if __name__ == "__main__":

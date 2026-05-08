@@ -378,19 +378,25 @@ exist in 0.5.1 and the auto-fallback won't find them.
 
 ### 7. Concrete inference commands per hardware
 
-#### Single arm (SO-100 / SO-101 / generic `so_follower`)
+The script uses lerobot's standard draccus-based config: `--robot.*`
+flags configure an embedded `RobotConfig` exactly the same way
+`lerobot-record` and `lerobot-rollout` do. Pass `--robot.cameras='{...}'`
+just like upstream lerobot.
+
+#### Single arm (SO-100 / SO-101)
 
 ```bash
 python scripts/realrobot_a2c2_inference.py \
-    --smolvla-path outputs/smolvla_v21 \
-    --head-ckpt    outputs/a2c2_head_v21/model.safetensors \
-    --robot-type   so_follower \
-    --robot-id     <your_id> \
-    --action-dim   6 \
-    --chunk-size   50 \
-    --episodes     3 \
-    --task         "pick up the cup" \
-    --home-on-start \
+    --robot.type=so100_follower \
+    --robot.port=/dev/ttyACM0 \
+    --robot.id=<your_id> \
+    --robot.cameras='{image: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, wrist_image: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}' \
+    --base-policy-path=outputs/smolvla_v21 \
+    --residual-policy-path=outputs/a2c2_head_v21 \
+    --task='pick up the cup' \
+    --episodes=3 \
+    --chunk-size=50 \
+    --action-dim=6 \
     --no-record
 ```
 
@@ -398,30 +404,46 @@ python scripts/realrobot_a2c2_inference.py \
 
 ```bash
 python scripts/realrobot_a2c2_inference.py \
-    --smolvla-path outputs/smolvla_v21 \
-    --head-ckpt    outputs/a2c2_head_v21/model.safetensors \
-    --robot-type   bi_so_follower \
-    --robot-id     <your_id> \
-    --action-dim   12 \
-    --chunk-size   50 \
-    --episodes     3 \
-    --task         "pick up the cup" \
-    --home-on-start \
+    --robot.type=bi_so_follower \
+    --robot.left_arm_port=/dev/ttyACM0 \
+    --robot.right_arm_port=/dev/ttyACM1 \
+    --robot.id=<your_id> \
+    --robot.cameras='{image: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, wrist_image_left: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}, wrist_image_right: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}}' \
+    --base-policy-path=outputs/smolvla_v21 \
+    --residual-policy-path=outputs/a2c2_head_v21 \
+    --task='pick up the cup' \
+    --episodes=3 \
+    --chunk-size=50 \
+    --action-dim=12 \
     --no-record
 ```
 
-When the script starts you should see:
+#### Camera config notes
+
+* Wrap the JSON for `--robot.cameras` in **single quotes** so bash keeps
+  the inner double quotes / braces.
+* Camera key names (`image`, `wrist_image`, ...) **must match** the
+  observation keys SmolVLA was trained against. Look at
+  `info.json` of your training dataset → `features` keys starting with
+  `observation.images.*` to see what the model expects.
+* For RealSense use `{type: realsense, serial_number_or_name: "012345", width: 640, height: 480, fps: 30}`.
+
+#### Skipping the residual head (SmolVLA-only baseline)
+
+Drop `--residual-policy-path` to run pure SmolVLA — the engine emits
+`a_exec = base_chunk[k]` directly. Useful for measuring the gap that A2C2
+fills in your real-robot evaluation table.
+
+#### Expected startup log
 
 ```
-[build_robot] registry import failed (...); falling back to direct per-robot import.
-[robot] so_follower (<your_id>)
+[robot] type=so100_follower, id=<your_id>
+[robot] homing ...
 [smolvla] loading outputs/smolvla_v21
-[a2c2 ] loading outputs/a2c2_head_v21/model.safetensors
+[a2c2 ] loading outputs/a2c2_head_v21
+========== episode 1/3 ==========
+place objects, press ENTER to start...
 ```
-
-The `registry import failed ... falling back` line is **expected and
-benign** in lerobot 0.5.1 — the script tries the legacy registry first,
-then auto-imports `lerobot.robots.<robot_type>` directly.
 
 ### 8. Pre-flight diagnostic checklist
 
