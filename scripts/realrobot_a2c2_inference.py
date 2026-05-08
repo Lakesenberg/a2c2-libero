@@ -42,10 +42,22 @@ plus the corresponding cameras.
 """
 # NOTE: do NOT add `from __future__ import annotations` here.
 import math
+import os
 import signal
 import time
 from dataclasses import dataclass
 from typing import Optional
+
+# Force HuggingFace to operate offline by default — the inference machine
+# (4090) typically can't reach huggingface.co directly, only an internal
+# mirror or local cache. transformers/hub will still happily load
+# anything already in ~/.cache/huggingface/hub. Override with
+# `HF_HUB_OFFLINE=0` if you want online access for some reason.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+# If a mirror is set globally it'll still be used when HF_HUB_OFFLINE=0.
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 import numpy as np
 import torch
