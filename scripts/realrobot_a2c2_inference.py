@@ -155,7 +155,22 @@ def _config_kwargs_from_args(args, config_cls):
 
     # User-supplied free-form kwargs (e.g. {"max_relative_target": 5})
     if args.extra_config_kwargs:
-        extra = json.loads(args.extra_config_kwargs)
+        try:
+            extra = json.loads(args.extra_config_kwargs)
+        except json.JSONDecodeError as e:
+            raise SystemExit(
+                f"[build_robot] --extra-config-kwargs is not valid JSON.\n"
+                f"  raw value: {args.extra_config_kwargs!r}\n"
+                f"  error: {e}\n"
+                f"  hint: wrap the JSON in single quotes so bash keeps the "
+                f"double quotes intact, e.g.\n"
+                f"    --extra-config-kwargs '{{\"max_relative_target\": 5}}'"
+            )
+        if not isinstance(extra, dict):
+            raise SystemExit(
+                f"[build_robot] --extra-config-kwargs must be a JSON object "
+                f"(dict), got {type(extra).__name__}: {extra!r}"
+            )
         for k, v in extra.items():
             kwargs[k] = v
 
@@ -222,7 +237,18 @@ def _build_robot_direct(args):
     cfg = config_cls(**kwargs)
     if args.cameras_config:
         import json
-        cfg.cameras = json.loads(args.cameras_config)
+        try:
+            cfg.cameras = json.loads(args.cameras_config)
+        except json.JSONDecodeError as e:
+            raise SystemExit(
+                f"[build_robot] --cameras-config is not valid JSON.\n"
+                f"  raw value: {args.cameras_config!r}\n"
+                f"  error: {e}\n"
+                f"  hint: wrap the JSON in single quotes so bash keeps the "
+                f"double quotes intact, e.g.\n"
+                f"    --cameras-config '{{\"main\": {{\"type\": \"opencv\", "
+                f"\"index_or_path\": 0}}}}'"
+            )
     print(f"[build_robot] direct import: {robot_cls.__name__}({config_cls.__name__})")
     print(f"[build_robot] config kwargs: {kwargs}")
     return robot_cls(cfg)
