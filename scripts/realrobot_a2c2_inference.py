@@ -72,19 +72,69 @@ def parse_args():
 
 
 # --------------------------------------------------------------------------- #
+def _import_robot_api():
+    """Locate make_robot_from_config + RobotConfig across lerobot layouts.
+
+    Tries (in order):
+      1. lerobot.robots.{make_robot_from_config, configs.RobotConfig}     (v3+)
+      2. lerobot.common.robots.{make_robot_from_config, configs.RobotConfig}
+      3. lerobot.common.robots.{make_robot_from_config, config.RobotConfig}
+      4. lerobot.robots.{make_robot, configs.RobotConfig}
+    Raises a clear ImportError listing what was tried.
+    """
+    candidates = [
+        ("lerobot.robots", "make_robot_from_config", "lerobot.robots.configs", "RobotConfig"),
+        ("lerobot.common.robots", "make_robot_from_config", "lerobot.common.robots.configs", "RobotConfig"),
+        ("lerobot.common.robots", "make_robot_from_config", "lerobot.common.robots.config", "RobotConfig"),
+        ("lerobot.robots", "make_robot", "lerobot.robots.configs", "RobotConfig"),
+        ("lerobot.common.robots", "make_robot", "lerobot.common.robots.config", "RobotConfig"),
+    ]
+    last_error = None
+    for builder_mod, builder_name, cfg_mod, cfg_name in candidates:
+        try:
+            mb = __import__(builder_mod, fromlist=[builder_name])
+            mc = __import__(cfg_mod, fromlist=[cfg_name])
+            return getattr(mb, builder_name), getattr(mc, cfg_name)
+        except (ImportError, AttributeError) as e:
+            last_error = e
+    raise ImportError(
+        "Could not locate lerobot robot factory. Tried:\n  "
+        + "\n  ".join(f"{m}.{n} + {c}.{r}" for m, n, c, r in candidates)
+        + f"\nLast error: {last_error}"
+    )
+
+
 def build_robot(args):
-    """Construct a LeRobot robot wrapper from CLI args."""
-    from lerobot.robots import make_robot_from_config
-    from lerobot.robots.configs import RobotConfig
-    cfg = RobotConfig.from_kwargs(type=args.robot_type, id=args.robot_id)
+    """Construct a LeRobot robot wrapper from CLI args (layout-agnostic)."""
+    make_robot_from_config, RobotConfig = _import_robot_api()
+    if hasattr(RobotConfig, "from_kwargs"):
+        cfg = RobotConfig.from_kwargs(type=args.robot_type, id=args.robot_id)
+    else:
+        cfg = RobotConfig(type=args.robot_type, id=args.robot_id)
     if args.cameras_config:
         import json
         cfg.cameras = json.loads(args.cameras_config)
     return make_robot_from_config(cfg)
 
 
+def _import_smolvla():
+    """Locate SmolVLAPolicy across lerobot layouts."""
+    for mod in ("lerobot.policies.smolvla.modeling_smolvla",
+                "lerobot.common.policies.smolvla.modeling_smolvla"):
+        try:
+            m = __import__(mod, fromlist=["SmolVLAPolicy"])
+            return m.SmolVLAPolicy
+        except (ImportError, AttributeError):
+            continue
+    raise ImportError(
+        "Could not locate SmolVLAPolicy. Tried "
+        "lerobot.policies.smolvla.modeling_smolvla and "
+        "lerobot.common.policies.smolvla.modeling_smolvla."
+    )
+
+
 def load_smolvla(path: str, device: torch.device):
-    from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+    SmolVLAPolicy = _import_smolvla()
     p = SmolVLAPolicy.from_pretrained(path).to(device).eval()
     for prm in p.parameters():
         prm.requires_grad = False
