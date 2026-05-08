@@ -88,34 +88,9 @@ def _load_residual_policy(path, device):
     )
 
 
-def _import_parser_wrap():
-    """Locate lerobot's draccus wrapper."""
-    try:
-        from lerobot.configs.parser import wrap as parser_wrap
-        return parser_wrap
-    except ImportError:
-        pass
-    try:
-        from lerobot.common.configs.parser import wrap as parser_wrap
-        return parser_wrap
-    except ImportError:
-        pass
-    # Last-resort fallback: minimal draccus wrapper that resolves string
-    # annotations via typing.get_type_hints (handles `from __future__
-    # import annotations` defensively).
-    import draccus
-    import typing
-
-    def parser_wrap(*_a, **_k):
-        def _decorator(fn):
-            def _runner():
-                hints = typing.get_type_hints(fn)
-                cfg_type = next(iter(hints.values()))
-                cfg = draccus.parse(config_class=cfg_type)
-                return fn(cfg)
-            return _runner
-        return _decorator
-    return parser_wrap
+# Note: parser-wrap resolution is inlined in `main()` below — both
+# `lerobot.configs.parser.wrap` and a direct `draccus.parse` fallback
+# are tried in order.
 
 
 # --------------------------------------------------------------------------- #
@@ -123,17 +98,15 @@ def _import_parser_wrap():
 # --------------------------------------------------------------------------- #
 @dataclass
 class A2C2InferenceConfig:
-    # Embedded robot config. `--robot.type=so100_follower
-    # --robot.port=/dev/ttyACM0 --robot.cameras='{...}' --robot.id=...`
-    # all flow through this field via draccus, exactly like
-    # lerobot-record / lerobot-rollout.
-    robot: RobotConfig = None  # required at parse time; draccus enforces the discriminator
+    # Required fields (no default) — must come first per dataclass rules.
+    # `--robot.type=so100_follower --robot.port=/dev/ttyACM0
+    # --robot.cameras='{...}' --robot.id=...` all flow through this field
+    # via draccus, exactly like lerobot-record / lerobot-rollout.
+    robot: RobotConfig
+    base_policy_path: str
 
-    # Policy paths
-    base_policy_path: str = ""
+    # Optional fields (with defaults).
     residual_policy_path: Optional[str] = None
-
-    # Inference parameters
     chunk_size: int = 50
     action_dim: int = 6
     task: str = "do the task"
@@ -141,12 +114,8 @@ class A2C2InferenceConfig:
     max_episode_steps: int = 600
     tick_dt_ms: float = 5.0
     home_on_start: bool = True
-
-    # Recording
     no_record: bool = True
     dataset_repo: Optional[str] = None
-
-    # Misc
     device: str = "cuda"
 
 
@@ -364,15 +333,39 @@ def _main(cfg):
 
 
 def main():
-    """Entry point. Resolves the parser wrapper at call time so the
-    @decorator on `_main` references the right thing."""
-    parser_wrap = _import_parser_wrap()
+    """Entry point.
 
-    @parser_wrap()
-    def _wrapped(cfg: A2C2InferenceConfig):
-        _main(cfg)
+    Tries lerobot's `parser.wrap` first (matches lerobot-record /
+    lerobot-rollout exactly); falls back to a plain `draccus.parse` if
+    the wrapper isn't available in this lerobot version. Both paths end
+    up calling `_main(cfg)` with a fully-populated A2C2InferenceConfig.
+    """
+    # Path 1: lerobot wrapper (preferred)
+    try:
+        from lerobot.configs.parser import wrap as parser_wrap
 
-    _wrapped()
+        @parser_wrap()
+        def _wrapped(cfg: A2C2InferenceConfig):
+            _main(cfg)
+        _wrapped()
+        return
+    except ImportError:
+        pass
+    try:
+        from lerobot.common.configs.parser import wrap as parser_wrap
+
+        @parser_wrap()
+        def _wrapped(cfg: A2C2InferenceConfig):
+            _main(cfg)
+        _wrapped()
+        return
+    except ImportError:
+        pass
+
+    # Path 2: direct draccus.parse (no wrapper)
+    import draccus
+    cfg = draccus.parse(config_class=A2C2InferenceConfig)
+    _main(cfg)
 
 
 if __name__ == "__main__":
