@@ -122,6 +122,23 @@ def _import_robot_for_cli():
 
 _imported_robots = _import_robot_for_cli()
 
+
+# Same problem for camera configs — `--robot.cameras='{front: {type:
+# opencv, ...}}'` requires lerobot.cameras.opencv to have been imported
+# so its `@CameraConfig.register_subclass("opencv")` ran. The package
+# `__init__.py` doesn't auto-import its subpackages either. Skip
+# RealSense / ZMQ to avoid optional deps blowing up; the user can opt
+# into them by passing --robot.cameras='{...type: realsense...}' (would
+# then need to add the import here).
+_SAFE_CAMERAS = ("opencv",)
+for _name in _SAFE_CAMERAS:
+    try:
+        _importlib.import_module(f"lerobot.cameras.{_name}")
+    except Exception as e:
+        print(f"[bootstrap] failed to import lerobot.cameras.{_name}: {e}",
+              file=_sys.stderr)
+
+
 from lerobot.robots import RobotConfig, make_robot_from_config
 
 
