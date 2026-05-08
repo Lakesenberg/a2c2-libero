@@ -311,6 +311,16 @@ class A2C2InferenceConfig:
     base_dataset_root: Optional[str] = None
     residual_dataset_root: Optional[str] = None
 
+    # Bypass for draccus's `dict[str, CameraConfig]` parsing on lerobot
+    # forks where the discriminated-union choice gets confused (draccus
+    # tries the wrong subclass first and chokes on `name=` kwarg).
+    # Pass a flat JSON: '{"laptop": {"index": 4, "width": 640, "height":
+    # 480, "fps": 30}, "wrist": {"index": 6}}' — every entry is built as
+    # an OpenCVCameraConfig, even if the physical device is a RealSense
+    # used through its OpenCV interface (matches data-collection setup).
+    # When set, this overrides any cameras passed via --robot.cameras.
+    cameras_json: Optional[str] = None
+
     device: str = "cuda"
 
 
@@ -465,6 +475,53 @@ def _main(cfg):
     # --- robot ---
     print(f"[robot] type={getattr(cfg.robot, 'type', '?')}, "
           f"id={getattr(cfg.robot, 'id', '?')}")
+
+    # Build OpenCV cameras from --cameras-json (bypasses draccus union
+    # parsing — useful on lerobot forks where the discriminator chokes
+    # on `name` kwarg or picks the wrong subclass).
+    if cfg.cameras_json:
+        import json
+        try:
+            cams_spec = json.loads(cfg.cameras_json)
+        except json.JSONDecodeError as e:
+            raise SystemExit(
+                f"--cameras-json is not valid JSON: {e}\n"
+                f"  raw: {cfg.cameras_json!r}\n"
+                f"  example: --cameras-json='{{\"laptop\": {{\"index\": 4, "
+                f"\"width\": 640, \"height\": 480, \"fps\": 30}}, \"wrist\": "
+                f"{{\"index\": 6}}}}'"
+            )
+        # Locate OpenCVCameraConfig — different layouts in different forks.
+        OpenCVCameraConfig = None
+        for mod in (
+            "lerobot.cameras.opencv.configuration_opencv",
+            "lerobot.cameras.opencv",
+            "lerobot.common.cameras.opencv.configuration_opencv",
+        ):
+            try:
+                m = __import__(mod, fromlist=["OpenCVCameraConfig"])
+                OpenCVCameraConfig = getattr(m, "OpenCVCameraConfig", None) \
+                                     or getattr(m, "OpenCVConfig", None)
+                if OpenCVCameraConfig is not None:
+                    break
+            except (ImportError, AttributeError):
+                continue
+        if OpenCVCameraConfig is None:
+            raise ImportError("Could not locate OpenCVCameraConfig in lerobot")
+
+        cams = {}
+        for cam_name, spec in cams_spec.items():
+            kw = {}
+            # Robust against either `index` or `index_or_path` field name.
+            idx_value = spec.get("index", spec.get("index_or_path", 0))
+            kw["index_or_path"] = idx_value
+            for k in ("width", "height", "fps"):
+                if k in spec:
+                    kw[k] = spec[k]
+            cams[cam_name] = OpenCVCameraConfig(**kw)
+            print(f"[cameras] {cam_name}: {OpenCVCameraConfig.__name__}({kw})")
+        cfg.robot.cameras = cams
+
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
     if not robot.is_calibrated:
