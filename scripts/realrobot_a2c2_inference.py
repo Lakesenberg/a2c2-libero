@@ -73,17 +73,11 @@ def parse_args():
 
 # --------------------------------------------------------------------------- #
 def _import_robot_api():
-    """Locate make_robot_from_config + RobotConfig across lerobot layouts.
-
-    Tries (in order):
-      1. lerobot.robots.{make_robot_from_config, configs.RobotConfig}     (v3+)
-      2. lerobot.common.robots.{make_robot_from_config, configs.RobotConfig}
-      3. lerobot.common.robots.{make_robot_from_config, config.RobotConfig}
-      4. lerobot.robots.{make_robot, configs.RobotConfig}
-    Raises a clear ImportError listing what was tried.
-    """
+    """Locate (make_robot_from_config, RobotConfig) across lerobot layouts."""
     candidates = [
         ("lerobot.robots", "make_robot_from_config", "lerobot.robots.configs", "RobotConfig"),
+        ("lerobot.robots", "make_robot_from_config", "lerobot.robots.config", "RobotConfig"),
+        ("lerobot.robots.utils", "make_robot_from_config", "lerobot.robots.configs", "RobotConfig"),
         ("lerobot.common.robots", "make_robot_from_config", "lerobot.common.robots.configs", "RobotConfig"),
         ("lerobot.common.robots", "make_robot_from_config", "lerobot.common.robots.config", "RobotConfig"),
         ("lerobot.robots", "make_robot", "lerobot.robots.configs", "RobotConfig"),
@@ -104,17 +98,72 @@ def _import_robot_api():
     )
 
 
-def build_robot(args):
-    """Construct a LeRobot robot wrapper from CLI args (layout-agnostic)."""
-    make_robot_from_config, RobotConfig = _import_robot_api()
-    if hasattr(RobotConfig, "from_kwargs"):
-        cfg = RobotConfig.from_kwargs(type=args.robot_type, id=args.robot_id)
-    else:
-        cfg = RobotConfig(type=args.robot_type, id=args.robot_id)
+def _build_robot_direct(args):
+    """Fallback: import the robot class + config directly from
+    `lerobot.robots.<robot_type>` (matches new lerobot layout where each
+    robot ships its own subpackage exporting `<RobotName>` and
+    `<RobotName>Config`).
+    """
+    import importlib
+
+    sub = args.robot_type
+    try:
+        mod = importlib.import_module(f"lerobot.robots.{sub}")
+    except ImportError as e:
+        raise ImportError(
+            f"lerobot.robots.{sub} not importable. Make sure the robot "
+            f"package is installed and `--robot-type` matches the "
+            f"submodule name."
+        ) from e
+
+    # Find a class whose name *starts with* a Pascal-cased version of the
+    # robot type, and a config class ending in `Config`.
+    pascal = "".join(p.title() for p in sub.split("_"))
+    robot_cls = None
+    config_cls = None
+    for name in dir(mod):
+        obj = getattr(mod, name)
+        if not isinstance(obj, type):
+            continue
+        if name.lower().endswith("config") and pascal.lower() in name.lower():
+            config_cls = obj
+        elif (name.lower() == pascal.lower()
+              or pascal.lower() in name.lower()):
+            if not name.lower().endswith("config"):
+                robot_cls = obj
+    if robot_cls is None or config_cls is None:
+        raise ImportError(
+            f"Could not auto-detect robot class / config in lerobot.robots.{sub}. "
+            f"Exports: {[n for n in dir(mod) if not n.startswith('_')]}"
+        )
+    cfg = config_cls(id=args.robot_id)
     if args.cameras_config:
         import json
         cfg.cameras = json.loads(args.cameras_config)
-    return make_robot_from_config(cfg)
+    return robot_cls(cfg)
+
+
+def build_robot(args):
+    """Construct a LeRobot robot wrapper, layout-agnostic.
+
+    Prefers the registry-style `make_robot_from_config(...)`. If that's
+    unavailable (newer lerobot drops the global registry), falls back to
+    importing the per-robot class directly.
+    """
+    try:
+        make_robot_from_config, RobotConfig = _import_robot_api()
+        if hasattr(RobotConfig, "from_kwargs"):
+            cfg = RobotConfig.from_kwargs(type=args.robot_type, id=args.robot_id)
+        else:
+            cfg = RobotConfig(type=args.robot_type, id=args.robot_id)
+        if args.cameras_config:
+            import json
+            cfg.cameras = json.loads(args.cameras_config)
+        return make_robot_from_config(cfg)
+    except ImportError as e:
+        print(f"[build_robot] registry import failed ({e}); "
+              "falling back to direct per-robot import.")
+        return _build_robot_direct(args)
 
 
 def _import_smolvla():
