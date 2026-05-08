@@ -55,8 +55,22 @@ def parse_args():
                    help="inferred from first build_state if omitted")
     p.add_argument("--robot-type", default="bi_so_follower")
     p.add_argument("--robot-id", required=True)
+    p.add_argument("--port", default=None,
+                   help="Serial port for the motor bus (e.g. /dev/ttyACM0). "
+                        "Required by lerobot 0.5+ SO-family configs. If "
+                        "omitted the script will look up the calibration "
+                        "file at ~/.cache/huggingface/lerobot/calibration/"
+                        "robots/<robot_type>/<robot_id>.json")
+    p.add_argument("--port-left", default=None,
+                   help="Bi-arm only: left-arm serial port")
+    p.add_argument("--port-right", default=None,
+                   help="Bi-arm only: right-arm serial port")
     p.add_argument("--cameras-config", default=None,
                    help="JSON string for cameras, or use robot defaults")
+    p.add_argument("--extra-config-kwargs", default=None,
+                   help="JSON string of additional kwargs to pass to the "
+                        "robot Config dataclass, e.g. "
+                        "'{\"max_relative_target\": 5}'")
     p.add_argument("--action-dim", type=int, default=12,
                    help="bi-SO-ARM = 12 (6+6); single arm = 6 or 7")
     p.add_argument("--chunk-size", type=int, default=50)
@@ -98,6 +112,60 @@ def _import_robot_api():
     )
 
 
+def _config_kwargs_from_args(args, config_cls):
+    """Build the kwargs dict for a robot Config dataclass from CLI args.
+
+    Handles required fields (port, port_left, port_right) by inspecting
+    the dataclass fields, and accepts a free-form JSON via
+    ``--extra-config-kwargs`` to forward whatever the user wants.
+    """
+    import dataclasses
+    import json
+
+    field_names = set()
+    if dataclasses.is_dataclass(config_cls):
+        field_names = {f.name for f in dataclasses.fields(config_cls)}
+
+    kwargs: dict = {"id": args.robot_id}
+    # Single-arm port
+    if "port" in field_names:
+        if args.port is None:
+            raise ValueError(
+                f"{config_cls.__name__} requires `port` (e.g. /dev/ttyACM0). "
+                "Pass it via --port=/dev/ttyACM0."
+            )
+        kwargs["port"] = args.port
+    # Bi-arm ports
+    if "left_arm_port" in field_names or "port_left" in field_names:
+        port_field = "left_arm_port" if "left_arm_port" in field_names else "port_left"
+        if args.port_left is None:
+            raise ValueError(
+                f"{config_cls.__name__} requires `{port_field}`. "
+                "Pass it via --port-left=/dev/ttyACM0."
+            )
+        kwargs[port_field] = args.port_left
+    if "right_arm_port" in field_names or "port_right" in field_names:
+        port_field = "right_arm_port" if "right_arm_port" in field_names else "port_right"
+        if args.port_right is None:
+            raise ValueError(
+                f"{config_cls.__name__} requires `{port_field}`. "
+                "Pass it via --port-right=/dev/ttyACM1."
+            )
+        kwargs[port_field] = args.port_right
+
+    # User-supplied free-form kwargs (e.g. {"max_relative_target": 5})
+    if args.extra_config_kwargs:
+        extra = json.loads(args.extra_config_kwargs)
+        for k, v in extra.items():
+            kwargs[k] = v
+
+    # Drop kwargs that aren't valid fields (avoid TypeError) — keep `id`
+    # and any required positional we just set.
+    if field_names:
+        kwargs = {k: v for k, v in kwargs.items() if k in field_names}
+    return kwargs
+
+
 def _build_robot_direct(args):
     """Import the robot class + config directly from `lerobot.robots.<robot_type>`.
 
@@ -120,8 +188,6 @@ def _build_robot_direct(args):
 
     # Build a normalized form of the robot-type string for matching.
     norm = sub.replace("_", "").lower()      # e.g. "sofollower"
-    robot_cls = None
-    config_cls = None
     candidates_by_kind: dict[str, list[type]] = {"robot": [], "config": []}
     for name in dir(mod):
         if name.startswith("_"):
@@ -137,10 +203,14 @@ def _build_robot_direct(args):
 
     # Prefer the most specific match (longest class name) to avoid e.g.
     # picking up a base class.
-    if candidates_by_kind["config"]:
-        config_cls = max(candidates_by_kind["config"], key=lambda c: len(c.__name__))
-    if candidates_by_kind["robot"]:
-        robot_cls = max(candidates_by_kind["robot"], key=lambda c: len(c.__name__))
+    config_cls = (
+        max(candidates_by_kind["config"], key=lambda c: len(c.__name__))
+        if candidates_by_kind["config"] else None
+    )
+    robot_cls = (
+        max(candidates_by_kind["robot"], key=lambda c: len(c.__name__))
+        if candidates_by_kind["robot"] else None
+    )
 
     if robot_cls is None or config_cls is None:
         raise ImportError(
@@ -148,11 +218,13 @@ def _build_robot_direct(args):
             f"Exports: {[n for n in dir(mod) if not n.startswith('_')]}"
         )
 
-    cfg = config_cls(id=args.robot_id)
+    kwargs = _config_kwargs_from_args(args, config_cls)
+    cfg = config_cls(**kwargs)
     if args.cameras_config:
         import json
         cfg.cameras = json.loads(args.cameras_config)
     print(f"[build_robot] direct import: {robot_cls.__name__}({config_cls.__name__})")
+    print(f"[build_robot] config kwargs: {kwargs}")
     return robot_cls(cfg)
 
 
