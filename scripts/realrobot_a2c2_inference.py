@@ -1,6 +1,12 @@
 """Real-robot A2C2 inference following the lerobot + k1000dai/a2c2-libero
 canonical pattern.
 
+Important: this module deliberately does NOT use
+``from __future__ import annotations`` so that forward-referenced
+dataclass field types resolve to real classes at runtime — draccus needs
+the concrete `RobotConfig` to walk the discriminated union.
+
+
 CLI structure mirrors `lerobot-record` / `lerobot-rollout`: the top-level
 @parser.wrap()'d dataclass embeds a `robot: RobotConfig` field, so all
 `--robot.*` (including `--robot.cameras='{...}'`) works automatically via
@@ -34,81 +40,77 @@ Bi-SO-ARM (dual arm): swap `--robot.type=bi_so_follower` and supply
 `--robot.left_arm_port=/dev/ttyACM0 --robot.right_arm_port=/dev/ttyACM1`
 plus the corresponding cameras.
 """
-from __future__ import annotations
-
+# NOTE: do NOT add `from __future__ import annotations` here.
 import math
 import signal
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import torch
 
 
 # --------------------------------------------------------------------------- #
-# Imports lerobot (layout-agnostic helpers)
+# Resolve lerobot at module import time so the dataclass annotation below
+# can reference the real RobotConfig class (not a string).
 # --------------------------------------------------------------------------- #
-def _import_lerobot():
-    """Resolve the lerobot bits we need across slightly different layouts."""
-    from lerobot.robots import RobotConfig, make_robot_from_config
+from lerobot.robots import RobotConfig, make_robot_from_config
 
-    # Some forks expose policy classes under different module paths; try both.
-    SmolVLAPolicy = None
+
+def _load_smolvla(path, device):
     for mod in (
         "lerobot.policies.smolvla.modeling_smolvla",
         "lerobot.common.policies.smolvla.modeling_smolvla",
     ):
         try:
             SmolVLAPolicy = __import__(mod, fromlist=["SmolVLAPolicy"]).SmolVLAPolicy
-            break
+            return SmolVLAPolicy.from_pretrained(path).to(device).eval()
         except (ImportError, AttributeError):
             continue
-    if SmolVLAPolicy is None:
-        raise ImportError("Could not locate SmolVLAPolicy")
+    raise ImportError("Could not locate SmolVLAPolicy")
 
-    # ResidualTransformerPolicy lives in the fork; load lazily so the script
-    # is still usable for SmolVLA-only baseline runs (residual_policy_path=None).
-    def _load_residual(path: str):
-        for mod in (
-            "lerobot.policies.residual_transformer.modeling_residual_transformer",
-            "lerobot.common.policies.residual_transformer.modeling_residual_transformer",
-        ):
-            try:
-                cls = __import__(mod, fromlist=["ResidualTransformerPolicy"])
-                return cls.ResidualTransformerPolicy.from_pretrained(path)
-            except (ImportError, AttributeError):
-                continue
-        raise ImportError(
-            "ResidualTransformerPolicy not found. The fork that adds this "
-            "policy must be importable as lerobot.policies.residual_transformer "
-            "(or lerobot.common.policies.residual_transformer)."
-        )
 
-    return RobotConfig, make_robot_from_config, SmolVLAPolicy, _load_residual
+def _load_residual_policy(path, device):
+    for mod in (
+        "lerobot.policies.residual_transformer.modeling_residual_transformer",
+        "lerobot.common.policies.residual_transformer.modeling_residual_transformer",
+    ):
+        try:
+            cls = __import__(mod, fromlist=["ResidualTransformerPolicy"])
+            return cls.ResidualTransformerPolicy.from_pretrained(path).to(device).eval()
+        except (ImportError, AttributeError):
+            continue
+    raise ImportError(
+        "ResidualTransformerPolicy not found. The fork that adds this "
+        "policy must be importable as lerobot.policies.residual_transformer "
+        "(or lerobot.common.policies.residual_transformer)."
+    )
 
 
 def _import_parser_wrap():
-    """Locate lerobot's draccus wrapper. Falls back to plain draccus.parse."""
+    """Locate lerobot's draccus wrapper."""
     try:
         from lerobot.configs.parser import wrap as parser_wrap
         return parser_wrap
     except ImportError:
-        try:
-            from lerobot.common.configs.parser import wrap as parser_wrap
-            return parser_wrap
-        except ImportError:
-            pass
-    # Fallback: build our own decorator on top of draccus.parse_known_args
+        pass
+    try:
+        from lerobot.common.configs.parser import wrap as parser_wrap
+        return parser_wrap
+    except ImportError:
+        pass
+    # Last-resort fallback: minimal draccus wrapper that resolves string
+    # annotations via typing.get_type_hints (handles `from __future__
+    # import annotations` defensively).
     import draccus
+    import typing
 
     def parser_wrap(*_a, **_k):
         def _decorator(fn):
             def _runner():
-                # Resolve the dataclass type from the callable's annotations.
-                import inspect
-                sig = inspect.signature(fn)
-                cfg_type = next(iter(sig.parameters.values())).annotation
+                hints = typing.get_type_hints(fn)
+                cfg_type = next(iter(hints.values()))
                 cfg = draccus.parse(config_class=cfg_type)
                 return fn(cfg)
             return _runner
@@ -116,25 +118,20 @@ def _import_parser_wrap():
     return parser_wrap
 
 
-RobotConfig, make_robot_from_config, _SmolVLAPolicyLazy, _load_residual_policy = (
-    None, None, None, None
-)
-parser_wrap = None
-
-
 # --------------------------------------------------------------------------- #
 # Top-level config (draccus dataclass)
 # --------------------------------------------------------------------------- #
 @dataclass
 class A2C2InferenceConfig:
-    # Embedded robot config — `--robot.type=...` / `--robot.cameras={...}`
-    # / `--robot.port=...` all flow through this field via draccus, exactly
-    # the same way lerobot-record / lerobot-rollout work.
-    robot: "RobotConfig" = None  # type: ignore  # filled in main()
+    # Embedded robot config. `--robot.type=so100_follower
+    # --robot.port=/dev/ttyACM0 --robot.cameras='{...}' --robot.id=...`
+    # all flow through this field via draccus, exactly like
+    # lerobot-record / lerobot-rollout.
+    robot: RobotConfig = None  # required at parse time; draccus enforces the discriminator
 
     # Policy paths
     base_policy_path: str = ""
-    residual_policy_path: str | None = None
+    residual_policy_path: Optional[str] = None
 
     # Inference parameters
     chunk_size: int = 50
@@ -147,7 +144,7 @@ class A2C2InferenceConfig:
 
     # Recording
     no_record: bool = True
-    dataset_repo: str | None = None
+    dataset_repo: Optional[str] = None
 
     # Misc
     device: str = "cuda"
@@ -172,10 +169,10 @@ class A2C2Inferencer:
         self,
         base_policy,
         residual_policy,
-        chunk_size: int,
-        action_dim: int,
-        device: torch.device,
-    ) -> None:
+        chunk_size,
+        action_dim,
+        device,
+    ):
         self.base = base_policy
         self.residual = residual_policy
         self.H = chunk_size
@@ -183,10 +180,10 @@ class A2C2Inferencer:
         self.device = device
         self.reset()
 
-    def reset(self) -> None:
-        self._chunk: torch.Tensor | None = None       # (T, A) on device
-        self._vlm_hidden: torch.Tensor | None = None  # (T, ...) on device
-        self._k: int = 0
+    def reset(self):
+        self._chunk = None       # (T, A) on device
+        self._vlm_hidden = None  # (T, ...) on device
+        self._k = 0
 
     @torch.no_grad()
     def step(self, observation: dict, task: str) -> torch.Tensor:
@@ -290,17 +287,20 @@ def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
 # --------------------------------------------------------------------------- #
 # Main entry point
 # --------------------------------------------------------------------------- #
-def _main(cfg: A2C2InferenceConfig) -> None:
-    global RobotConfig, make_robot_from_config, _SmolVLAPolicyLazy, _load_residual_policy
-    RobotConfig, make_robot_from_config, _SmolVLAPolicyLazy, _load_residual_policy = _import_lerobot()
-
+def _main(cfg):
     if not cfg.base_policy_path:
         raise SystemExit("--base-policy-path is required")
+    if cfg.robot is None:
+        raise SystemExit(
+            "--robot.* is required (e.g. --robot.type=so100_follower "
+            "--robot.port=/dev/ttyACM0)"
+        )
 
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
     # --- robot ---
-    print(f"[robot] type={cfg.robot.type}, id={cfg.robot.id}")
+    print(f"[robot] type={getattr(cfg.robot, 'type', '?')}, "
+          f"id={getattr(cfg.robot, 'id', '?')}")
     robot = make_robot_from_config(cfg.robot)
     robot.connect()
     if not robot.is_calibrated:
@@ -315,7 +315,7 @@ def _main(cfg: A2C2InferenceConfig) -> None:
 
     # --- base policy (SmolVLA) ---
     print(f"[smolvla] loading {cfg.base_policy_path}")
-    base = _SmolVLAPolicyLazy.from_pretrained(cfg.base_policy_path).to(device).eval()
+    base = _load_smolvla(cfg.base_policy_path, device)
     for p in base.parameters():
         p.requires_grad = False
 
@@ -323,7 +323,7 @@ def _main(cfg: A2C2InferenceConfig) -> None:
     residual = None
     if cfg.residual_policy_path:
         print(f"[a2c2 ] loading {cfg.residual_policy_path}")
-        residual = _load_residual_policy(cfg.residual_policy_path).to(device).eval()
+        residual = _load_residual_policy(cfg.residual_policy_path, device)
         for p in residual.parameters():
             p.requires_grad = False
 
@@ -363,10 +363,9 @@ def _main(cfg: A2C2InferenceConfig) -> None:
     print(f"\n=== final: {n_succ}/{len(metrics)} episodes succeeded ===")
 
 
-def main() -> None:
+def main():
     """Entry point. Resolves the parser wrapper at call time so the
     @decorator on `_main` references the right thing."""
-    global parser_wrap
     parser_wrap = _import_parser_wrap()
 
     @parser_wrap()

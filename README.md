@@ -385,6 +385,8 @@ just like upstream lerobot.
 
 #### Single arm (SO-100 / SO-101)
 
+**Multi-line (use carefully — each `\` must end the line with NO trailing whitespace):**
+
 ```bash
 python scripts/realrobot_a2c2_inference.py \
     --robot.type=so100_follower \
@@ -398,6 +400,12 @@ python scripts/realrobot_a2c2_inference.py \
     --chunk-size=50 \
     --action-dim=6 \
     --no-record
+```
+
+**Single-line (paste-safe, recommended):**
+
+```bash
+python scripts/realrobot_a2c2_inference.py --robot.type=so100_follower --robot.port=/dev/ttyACM0 --robot.id=<your_id> --robot.cameras='{image: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}, wrist_image: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30}}' --base-policy-path=outputs/smolvla_v21 --residual-policy-path=outputs/a2c2_head_v21 --task='pick up the cup' --episodes=3 --chunk-size=50 --action-dim=6 --no-record
 ```
 
 #### Dual arm (Bi-SO-ARM)
