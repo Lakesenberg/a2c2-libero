@@ -156,10 +156,15 @@ def _override_dataset_in_config(ckpt_dir, dataset_repo_id, dataset_root):
     """If the policy's config.json points at a dataset that isn't reachable
     from this machine, rewrite it before from_pretrained() reads it.
 
+    Also auto-fixes hard-coded absolute paths to HuggingFace VLM caches
+    (e.g. /root/.cache/huggingface/hub/models--HuggingFaceTB--SmolVLM2-...)
+    that were baked in during training on a different machine.
+
     Returns True if config.json was rewritten.
     """
     import json
     import os
+    import re
 
     cfg_path = os.path.join(ckpt_dir, "config.json")
     if not os.path.exists(cfg_path):
@@ -167,11 +172,11 @@ def _override_dataset_in_config(ckpt_dir, dataset_repo_id, dataset_root):
     with open(cfg_path) as f:
         cfg = json.load(f)
 
-    # Common keys lerobot uses to point at the training dataset
-    keys = ("dataset_repo_id", "dataset_id", "repo_id")
     changed = False
+
+    # 1. Override dataset_repo_id / dataset_root if user requested.
     if dataset_repo_id is not None:
-        for k in keys:
+        for k in ("dataset_repo_id", "dataset_id", "repo_id"):
             if k in cfg and cfg[k] != dataset_repo_id:
                 print(f"[ckpt-fix] {cfg_path}: {k}: {cfg[k]!r} -> {dataset_repo_id!r}")
                 cfg[k] = dataset_repo_id
@@ -179,6 +184,33 @@ def _override_dataset_in_config(ckpt_dir, dataset_repo_id, dataset_root):
     if dataset_root is not None and "dataset_root" in cfg and cfg["dataset_root"] != dataset_root:
         cfg["dataset_root"] = dataset_root
         changed = True
+
+    # 2. Auto-rewrite baked-in HF cache absolute paths.
+    # Matches: '/root/.cache/huggingface/hub/models--<owner>--<name>/snapshots/<hash>'
+    # Replaces with: '<owner>/<name>'
+    cache_pattern = re.compile(
+        r"^/.*?/\.cache/huggingface/hub/models--([^/]+)--([^/]+)/snapshots/[a-f0-9]+/?.*$"
+    )
+
+    def _walk(d, path=""):
+        nonlocal changed
+        if isinstance(d, dict):
+            for k, v in list(d.items()):
+                if isinstance(v, str):
+                    m = cache_pattern.match(v)
+                    if m:
+                        repo_id = f"{m.group(1)}/{m.group(2)}"
+                        print(f"[ckpt-fix] {cfg_path}: {path}.{k}: "
+                              f"absolute HF cache path -> {repo_id!r}")
+                        d[k] = repo_id
+                        changed = True
+                elif isinstance(v, (dict, list)):
+                    _walk(v, f"{path}.{k}")
+        elif isinstance(d, list):
+            for i, v in enumerate(d):
+                _walk(v, f"{path}[{i}]")
+
+    _walk(cfg)
 
     if changed:
         with open(cfg_path, "w") as f:
@@ -189,8 +221,10 @@ def _override_dataset_in_config(ckpt_dir, dataset_repo_id, dataset_root):
 def _load_smolvla(path, device, dataset_repo_id=None, dataset_root=None):
     resolved = _resolve_ckpt_path(path, "base_policy_path")
     print(f"[smolvla] resolved ckpt dir: {resolved}")
-    if dataset_repo_id or dataset_root:
-        _override_dataset_in_config(resolved, dataset_repo_id, dataset_root)
+    # Always run config patcher: fixes baked-in absolute HF cache paths
+    # left over from training on a different machine. dataset_repo_id /
+    # dataset_root only kick in when the user explicitly passes them.
+    _override_dataset_in_config(resolved, dataset_repo_id, dataset_root)
     for mod in (
         "lerobot.policies.smolvla.modeling_smolvla",
         "lerobot.common.policies.smolvla.modeling_smolvla",
@@ -206,8 +240,10 @@ def _load_smolvla(path, device, dataset_repo_id=None, dataset_root=None):
 def _load_residual_policy(path, device, dataset_repo_id=None, dataset_root=None):
     resolved = _resolve_ckpt_path(path, "residual_policy_path")
     print(f"[a2c2 ] resolved ckpt dir: {resolved}")
-    if dataset_repo_id or dataset_root:
-        _override_dataset_in_config(resolved, dataset_repo_id, dataset_root)
+    # Always run config patcher: fixes baked-in absolute HF cache paths
+    # left over from training on a different machine. dataset_repo_id /
+    # dataset_root only kick in when the user explicitly passes them.
+    _override_dataset_in_config(resolved, dataset_repo_id, dataset_root)
     for mod in (
         "lerobot.policies.residual_transformer.modeling_residual_transformer",
         "lerobot.common.policies.residual_transformer.modeling_residual_transformer",
