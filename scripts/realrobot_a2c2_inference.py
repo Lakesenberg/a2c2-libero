@@ -54,7 +54,26 @@ import torch
 # --------------------------------------------------------------------------- #
 # Resolve lerobot at module import time so the dataclass annotation below
 # can reference the real RobotConfig class (not a string).
+#
+# IMPORTANT: also force-import every robot subpackage so each robot's
+# `@RobotConfig.register_subclass("...")` decorator runs and the
+# discriminator names (so100_follower / so101_follower / bi_so_follower
+# / koch_follower / ...) become valid `--robot.type=` choices. Without
+# this you'd see "invalid choice: 'so101_follower'" because the subpackage
+# directory exists on disk but was never imported, so its decorator
+# didn't register the type with draccus.
 # --------------------------------------------------------------------------- #
+import lerobot.robots as _lr_robots
+import pkgutil as _pkgutil
+for _finder, _name, _ in _pkgutil.iter_modules(_lr_robots.__path__):
+    try:
+        __import__(f"lerobot.robots.{_name}")
+    except Exception:
+        # Subpackages with optional deps (e.g. realsense, zmq) may fail to
+        # import; that's fine — only the robot you actually use needs to
+        # load successfully.
+        pass
+
 from lerobot.robots import RobotConfig, make_robot_from_config
 
 
