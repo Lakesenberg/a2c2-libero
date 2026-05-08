@@ -99,10 +99,12 @@ def _import_robot_api():
 
 
 def _build_robot_direct(args):
-    """Fallback: import the robot class + config directly from
-    `lerobot.robots.<robot_type>` (matches new lerobot layout where each
-    robot ships its own subpackage exporting `<RobotName>` and
-    `<RobotName>Config`).
+    """Import the robot class + config directly from `lerobot.robots.<robot_type>`.
+
+    Matches the lerobot 0.5+ layout where each robot ships its own
+    subpackage exporting a robot class plus a config dataclass. Detection
+    is case-insensitive to handle both ``SOFollower`` (acronym style) and
+    ``SoFollower`` (Pascal style).
     """
     import importlib
 
@@ -116,54 +118,89 @@ def _build_robot_direct(args):
             f"submodule name."
         ) from e
 
-    # Find a class whose name *starts with* a Pascal-cased version of the
-    # robot type, and a config class ending in `Config`.
-    pascal = "".join(p.title() for p in sub.split("_"))
+    # Build a normalized form of the robot-type string for matching.
+    norm = sub.replace("_", "").lower()      # e.g. "sofollower"
     robot_cls = None
     config_cls = None
+    candidates_by_kind: dict[str, list[type]] = {"robot": [], "config": []}
     for name in dir(mod):
+        if name.startswith("_"):
+            continue
         obj = getattr(mod, name)
         if not isinstance(obj, type):
             continue
-        if name.lower().endswith("config") and pascal.lower() in name.lower():
-            config_cls = obj
-        elif (name.lower() == pascal.lower()
-              or pascal.lower() in name.lower()):
-            if not name.lower().endswith("config"):
-                robot_cls = obj
+        nname = name.replace("_", "").lower()
+        if "config" in nname and norm in nname:
+            candidates_by_kind["config"].append(obj)
+        elif norm in nname and "config" not in nname:
+            candidates_by_kind["robot"].append(obj)
+
+    # Prefer the most specific match (longest class name) to avoid e.g.
+    # picking up a base class.
+    if candidates_by_kind["config"]:
+        config_cls = max(candidates_by_kind["config"], key=lambda c: len(c.__name__))
+    if candidates_by_kind["robot"]:
+        robot_cls = max(candidates_by_kind["robot"], key=lambda c: len(c.__name__))
+
     if robot_cls is None or config_cls is None:
         raise ImportError(
             f"Could not auto-detect robot class / config in lerobot.robots.{sub}. "
             f"Exports: {[n for n in dir(mod) if not n.startswith('_')]}"
         )
+
     cfg = config_cls(id=args.robot_id)
     if args.cameras_config:
         import json
         cfg.cameras = json.loads(args.cameras_config)
+    print(f"[build_robot] direct import: {robot_cls.__name__}({config_cls.__name__})")
     return robot_cls(cfg)
 
 
 def build_robot(args):
     """Construct a LeRobot robot wrapper, layout-agnostic.
 
-    Prefers the registry-style `make_robot_from_config(...)`. If that's
-    unavailable (newer lerobot drops the global registry), falls back to
-    importing the per-robot class directly.
+    Strategy:
+      1. Try direct per-robot import first (lerobot.robots.<robot_type>).
+         This is the most robust path on lerobot 0.5+ where the abstract
+         RobotConfig no longer accepts `type=` as a kwarg (it's a draccus
+         discriminator field on the union of subclasses).
+      2. Fall back to the registry-style ``make_robot_from_config`` only
+         if direct import fails.
     """
+    # 1. Direct path — works on 0.5.1, 0.4.x and the fork.
     try:
-        make_robot_from_config, RobotConfig = _import_robot_api()
-        if hasattr(RobotConfig, "from_kwargs"):
-            cfg = RobotConfig.from_kwargs(type=args.robot_type, id=args.robot_id)
-        else:
-            cfg = RobotConfig(type=args.robot_type, id=args.robot_id)
-        if args.cameras_config:
-            import json
-            cfg.cameras = json.loads(args.cameras_config)
-        return make_robot_from_config(cfg)
-    except ImportError as e:
-        print(f"[build_robot] registry import failed ({e}); "
-              "falling back to direct per-robot import.")
         return _build_robot_direct(args)
+    except ImportError as direct_err:
+        print(f"[build_robot] direct import failed ({direct_err}); "
+              "trying registry path.")
+
+    # 2. Registry fallback (legacy / draccus-aware).
+    make_robot_from_config, RobotConfig = _import_robot_api()
+    cfg = None
+    # 2a. draccus-style decode (lerobot 0.5+).
+    try:
+        import draccus
+        cfg_dict = {"type": args.robot_type, "id": args.robot_id}
+        cfg = draccus.decode(cfg_dict, RobotConfig)
+    except Exception:
+        pass
+    # 2b. classmethod from_kwargs (older fork).
+    if cfg is None and hasattr(RobotConfig, "from_kwargs"):
+        try:
+            cfg = RobotConfig.from_kwargs(type=args.robot_type, id=args.robot_id)
+        except Exception:
+            pass
+    # 2c. Last-ditch: positional / kwargs construction (legacy).
+    if cfg is None:
+        try:
+            cfg = RobotConfig(type=args.robot_type, id=args.robot_id)
+        except TypeError:
+            cfg = RobotConfig(id=args.robot_id)
+
+    if args.cameras_config:
+        import json
+        cfg.cameras = json.loads(args.cameras_config)
+    return make_robot_from_config(cfg)
 
 
 def _import_smolvla():
