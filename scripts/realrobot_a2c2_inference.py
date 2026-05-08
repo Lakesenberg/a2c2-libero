@@ -64,27 +64,63 @@ import torch
 
 
 # --------------------------------------------------------------------------- #
-# Resolve lerobot at module import time so the dataclass annotation below
-# can reference the real RobotConfig class (not a string).
+# Resolve lerobot at module import time.
 #
-# IMPORTANT: also force-import every robot subpackage so each robot's
-# `@RobotConfig.register_subclass("...")` decorator runs and the
-# discriminator names (so100_follower / so101_follower / bi_so_follower
-# / koch_follower / ...) become valid `--robot.type=` choices. Without
-# this you'd see "invalid choice: 'so101_follower'" because the subpackage
-# directory exists on disk but was never imported, so its decorator
-# didn't register the type with draccus.
+# We need RobotConfig + the SPECIFIC robot subpackage the user selected
+# imported so the discriminator name appears in draccus's choices.
+# Importing ALL robot subpackages is risky: some forks ship broken
+# default factories on robots like `stretch3` that crash draccus's
+# default-value introspection (e.g. `RealSenseCameraConfig(name=...)`
+# where `name` is not a valid kwarg in the current fork).
+#
+# So: pre-scan sys.argv for `--robot.type=X` and only import that one.
+# Fall back to importing the common SO/koch/openarm subpackages if the
+# user didn't pass --robot.type=... (e.g. when they pass --help).
 # --------------------------------------------------------------------------- #
-import lerobot.robots as _lr_robots
-import pkgutil as _pkgutil
-for _finder, _name, _ in _pkgutil.iter_modules(_lr_robots.__path__):
-    try:
-        __import__(f"lerobot.robots.{_name}")
-    except Exception:
-        # Subpackages with optional deps (e.g. realsense, zmq) may fail to
-        # import; that's fine — only the robot you actually use needs to
-        # load successfully.
-        pass
+import importlib as _importlib
+import sys as _sys
+
+_SAFE_ROBOTS = (
+    "so_follower", "bi_so_follower",
+    "koch_follower",
+    "openarm_follower", "bi_openarm_follower",
+    "lekiwi", "omx_follower",
+)
+
+
+def _import_robot_for_cli():
+    # Look for --robot.type=<name> in argv.
+    target = None
+    for i, a in enumerate(_sys.argv):
+        if a == "--robot.type" and i + 1 < len(_sys.argv):
+            target = _sys.argv[i + 1]
+            break
+        if a.startswith("--robot.type="):
+            target = a.split("=", 1)[1]
+            break
+
+    if target:
+        try:
+            _importlib.import_module(f"lerobot.robots.{target}")
+            return [target]
+        except Exception as e:
+            print(f"[bootstrap] failed to import lerobot.robots.{target}: {e}",
+                  file=_sys.stderr)
+            return []
+
+    # No --robot.type= given (e.g. --help). Best-effort import the safe
+    # set of common robots, skipping any that crash on import.
+    imported = []
+    for name in _SAFE_ROBOTS:
+        try:
+            _importlib.import_module(f"lerobot.robots.{name}")
+            imported.append(name)
+        except Exception:
+            pass
+    return imported
+
+
+_imported_robots = _import_robot_for_cli()
 
 from lerobot.robots import RobotConfig, make_robot_from_config
 
