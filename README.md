@@ -318,6 +318,41 @@ Reports per-tick latency p50/p95/p99, SmolVLA forward time, GPU memory.
 Use this to confirm the 4090 can hit your control rate before plugging in
 the robot.
 
+### Pre-requisite — install the `residual_transformer` policy class
+
+`ResidualTransformerPolicy` is added by k1000dai/a2c2-libero on top of
+upstream lerobot. If you installed lerobot from PyPI (or pulled the
+upstream main branch) it won't have this class and the script raises
+`ImportError: ResidualTransformerPolicy not found`.
+
+**One-time fix** — copy the policy package from the training fork into
+your local lerobot install:
+
+```bash
+# A100 (training machine, has the fork) — confirm the path
+ls /root/project/lq/a2c2-libero/src/lerobot/policies/residual_transformer/
+# Should list: __init__.py  configuration_*.py  modeling_*.py
+
+# 4090 (inference machine) — find your lerobot install location
+pip show lerobot | grep -E "Editable project location|Location"
+
+# scp the package across (replace the source/dest with your real paths)
+scp -r root@192.168.3.103:/root/project/lq/a2c2-libero/src/lerobot/policies/residual_transformer \
+       /home/user/lq/lerobot/src/lerobot/policies/
+
+# Verify
+python -c "from lerobot.policies.residual_transformer.modeling_residual_transformer import ResidualTransformerPolicy; print('OK')"
+```
+
+If the verify line raises a *different* ImportError (e.g. complaining
+about `PreTrainedPolicy` or some other helper not being available), the
+fork's `residual_transformer` code references API names that no longer
+exist in current lerobot. In that case you also need to grab the
+fork's `lerobot/policies/__init__.py` / `lerobot/policies/utils.py`
+overrides, or switch the inference machine to the same lerobot version
+the SmolVLA training fork uses (commit hash from `git rev-parse HEAD`
+inside the fork).
+
 ### 5. Troubleshooting (4090-only path)
 
 | Symptom | Fix |
