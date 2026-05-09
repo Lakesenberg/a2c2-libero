@@ -323,6 +323,46 @@ def _override_dataset_in_config(ckpt_dir, dataset_repo_id, dataset_root):
     return changed
 
 
+def _patch_inf_stats(policy, label):
+    """Replace inf normalization stats with identity (mean=0, std=1) so
+    actions / states aren't squashed to ~0 by a bogus reverse-norm.
+
+    The fork's training pipeline sometimes leaves `mean/std = inf` in
+    the saved stats (we saw this during dataset prep, the
+    `[normalize-fix] mean is inf` warnings come from the fork's runtime
+    detection). At inference time those inf stats either produce NaN
+    or get silently substituted with ones, which means the model's
+    normalized output (~[-1, 1]) is treated as already-unnormalized
+    real-world joint values — actions look like noise around zero.
+
+    Walk the policy's modules and clamp any inf normalization buffers.
+    """
+    fixed = 0
+    for name, module in policy.named_modules():
+        for buf_name in ("mean", "std", "min", "max",
+                         "input_mean", "input_std",
+                         "output_mean", "output_std"):
+            buf = getattr(module, buf_name, None)
+            if buf is None or not isinstance(buf, torch.Tensor):
+                continue
+            inf_mask = ~torch.isfinite(buf)
+            if not inf_mask.any():
+                continue
+            with torch.no_grad():
+                if "std" in buf_name or "max" in buf_name:
+                    buf[inf_mask] = 1.0
+                else:
+                    buf[inf_mask] = 0.0
+            fixed += int(inf_mask.sum().item())
+            print(f"[stats-fix] {label}: {name}.{buf_name} "
+                  f"replaced {int(inf_mask.sum().item())} inf with "
+                  f"{'1.0' if 'std' in buf_name or 'max' in buf_name else '0.0'}")
+    if fixed:
+        print(f"[stats-fix] {label}: total {fixed} inf entries patched. "
+              f"WARNING: actions may be unscaled; consider re-saving "
+              f"the ckpt with proper stats from your training dataset.")
+
+
 def _load_smolvla(path, device, dataset_repo_id=None, dataset_root=None):
     resolved = _resolve_ckpt_path(path, "base_policy_path")
     print(f"[smolvla] resolved ckpt dir: {resolved}")
@@ -336,7 +376,9 @@ def _load_smolvla(path, device, dataset_repo_id=None, dataset_root=None):
     ):
         try:
             SmolVLAPolicy = __import__(mod, fromlist=["SmolVLAPolicy"]).SmolVLAPolicy
-            return SmolVLAPolicy.from_pretrained(resolved).to(device).eval()
+            policy = SmolVLAPolicy.from_pretrained(resolved).to(device).eval()
+            _patch_inf_stats(policy, "smolvla")
+            return policy
         except (ImportError, AttributeError):
             continue
     raise ImportError("Could not locate SmolVLAPolicy")
@@ -355,7 +397,9 @@ def _load_residual_policy(path, device, dataset_repo_id=None, dataset_root=None)
     ):
         try:
             cls = __import__(mod, fromlist=["ResidualTransformerPolicy"])
-            return cls.ResidualTransformerPolicy.from_pretrained(resolved).to(device).eval()
+            policy = cls.ResidualTransformerPolicy.from_pretrained(resolved).to(device).eval()
+            _patch_inf_stats(policy, "a2c2_head")
+            return policy
         except (ImportError, AttributeError):
             continue
     raise ImportError(
@@ -399,6 +443,12 @@ class A2C2InferenceConfig:
     # lerobot-record / lerobot-rollout. Requires `pip install rerun-sdk`
     # (already a lerobot dep).
     display_data: bool = False
+
+    # Print the executed action vector to stdout every N ticks (0 to
+    # disable). Use this to verify the model is actually producing
+    # non-zero / non-tiny actions. Especially useful when the
+    # normalize-fix warnings fire (stats=inf in the SmolVLA ckpt).
+    print_action_every: int = 10
 
     # If provided, the policy's normalization stats are pulled from this
     # dataset (rather than from the ckpt directory or the dataset name
@@ -746,6 +796,21 @@ def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
         action_np = action.cpu().numpy().astype(np.float32)
         action_dict = _action_array_to_dict(action_np, motor_order)
         robot.send_action(action_dict)
+
+        # Verbose per-tick action printing.
+        if cfg.print_action_every > 0 and tick % cfg.print_action_every == 0:
+            state_vec = obs_t.get("observation.state")
+            if isinstance(state_vec, torch.Tensor):
+                state_str = " ".join(f"{x:+7.2f}" for x in state_vec.flatten().tolist())
+            else:
+                state_str = "?"
+            action_str = " ".join(f"{action_dict[f'{n}.pos']:+7.2f}" for n in motor_order)
+            delta_str = " ".join(
+                f"{action_dict[f'{n}.pos'] - float(state_vec.flatten()[i]):+6.2f}"
+                for i, n in enumerate(motor_order)
+            ) if isinstance(state_vec, torch.Tensor) else "?"
+            print(f"[t={tick:04d}] state=[{state_str}]  action=[{action_str}]  "
+                  f"Δ=[{delta_str}]")
 
         # Stream to rerun if --display_data
         _rr_log_observation(obs_t, action_dict, episode_idx, tick)
