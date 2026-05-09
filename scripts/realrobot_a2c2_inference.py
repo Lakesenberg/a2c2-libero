@@ -507,7 +507,38 @@ class A2C2Inferencer:
 # --------------------------------------------------------------------------- #
 # Observation preprocessing — convert raw robot output to SmolVLA layout
 # --------------------------------------------------------------------------- #
-def _preprocess_observation(obs, device):
+def _get_robot_motor_order(robot):
+    """Best-effort lookup of the robot's motor names in canonical order.
+
+    For SO-100/SO-101 follower, this is the physical chain order:
+    shoulder_pan → shoulder_lift → elbow_flex → wrist_flex →
+    wrist_roll → gripper. Sorting alphabetically would mangle the
+    state vector, so we read the actual motor list from the robot
+    instance.
+    """
+    candidates = []
+    # lerobot 0.5+: robot.bus.motors is an OrderedDict
+    bus = getattr(robot, "bus", None)
+    if bus is not None:
+        motors = getattr(bus, "motors", None)
+        if hasattr(motors, "keys"):
+            candidates.extend(motors.keys())
+    if not candidates:
+        # Try robot.motors directly
+        m = getattr(robot, "motors", None)
+        if hasattr(m, "keys"):
+            candidates.extend(m.keys())
+    if not candidates:
+        # Action features as a last resort
+        af = getattr(robot, "action_features", None)
+        if hasattr(af, "keys"):
+            for k in af.keys():
+                if isinstance(k, str) and k.endswith(".pos"):
+                    candidates.append(k.removesuffix(".pos"))
+    return list(candidates)
+
+
+def _preprocess_observation(obs, device, motor_order=None):
     """Convert raw lerobot robot.get_observation() output to the layout
     SmolVLA / residual_transformer expects.
 
@@ -587,14 +618,48 @@ def _preprocess_observation(obs, device):
 
     # Build observation.state from collected `.pos` scalars
     if state_parts and "observation.state" not in out:
-        names = sorted(state_parts.keys())
-        vec = torch.tensor([state_parts[n] for n in names],
+        if motor_order:
+            # Use robot's canonical motor order (physical chain order),
+            # not alphabetical — must match training.
+            ordered_keys = []
+            for name in motor_order:
+                for suffix in (".pos", ".position"):
+                    k = name + suffix
+                    if k in state_parts:
+                        ordered_keys.append(k)
+                        break
+            # Append any leftover keys at the end (in alphabetical order
+            # for stability).
+            leftover = sorted(set(state_parts.keys()) - set(ordered_keys))
+            ordered_keys.extend(leftover)
+        else:
+            ordered_keys = sorted(state_parts.keys())
+        vec = torch.tensor([state_parts[n] for n in ordered_keys],
                            dtype=torch.float32, device=device).unsqueeze(0)
         out["observation.state"] = vec
         if "_state_keys" not in out:
-            out["_state_keys"] = names      # debug aid; ignored by SmolVLA
+            out["_state_keys"] = ordered_keys      # debug aid
 
     return out
+
+
+def _action_array_to_dict(action_np, motor_order):
+    """Convert a 1-D action array into the {name.pos: float} dict that
+    lerobot 0.5+ robot.send_action() expects.
+    """
+    if motor_order is None or len(motor_order) == 0:
+        raise RuntimeError(
+            "Cannot dispatch action: robot motor order unknown. "
+            "Pass --robot.* correctly so robot.bus.motors is populated."
+        )
+    flat = np.asarray(action_np).reshape(-1)
+    if len(flat) != len(motor_order):
+        raise RuntimeError(
+            f"Action dim mismatch: model output has {len(flat)} values but "
+            f"robot has {len(motor_order)} motors ({motor_order}). "
+            f"Check --action-dim and your residual head config."
+        )
+    return {f"{name}.pos": float(v) for name, v in zip(motor_order, flat)}
 
 
 # --------------------------------------------------------------------------- #
@@ -604,8 +669,12 @@ def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
                 episode_idx: int) -> dict:
     """Drive one episode end-to-end. Returns metrics dict."""
     inferencer.reset()
+    motor_order = _get_robot_motor_order(robot)
+    if episode_idx == 0 and motor_order:
+        print(f"[robot] motor order: {motor_order}")
+
     obs = robot.get_observation()
-    obs_t = _preprocess_observation(obs, cfg.device)
+    obs_t = _preprocess_observation(obs, cfg.device, motor_order=motor_order)
 
     if episode_idx == 0:
         # Print the resolved observation layout once so users can verify
@@ -628,7 +697,8 @@ def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
         latencies.append(elapsed)
 
         action_np = action.cpu().numpy().astype(np.float32)
-        robot.send_action(action_np)
+        action_dict = _action_array_to_dict(action_np, motor_order)
+        robot.send_action(action_dict)
 
         if tick_dt > 0:
             sleep_for = tick_dt - (time.perf_counter() - t0)
@@ -637,7 +707,7 @@ def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
 
         # Refresh observation (re-read sensors)
         obs = robot.get_observation()
-        obs_t = _preprocess_observation(obs, cfg.device)
+        obs_t = _preprocess_observation(obs, cfg.device, motor_order=motor_order)
 
     succ_str = input(
         f"[ep {episode_idx + 1}/{cfg.episodes}] success? [y/N] "
