@@ -64,6 +64,46 @@ import torch
 
 
 # --------------------------------------------------------------------------- #
+# Workaround for PyTorch's "Cannot copy out of meta tensor" bug.
+#
+# Some lerobot fork policies (notably SmolVLAPolicy) load weights via
+# transformers' low_cpu_mem_usage=True path, which initializes parameters
+# on the `meta` device, then later calls `policy.to(config.device)` to
+# move to GPU. With recent torch (2.4+), `.to()` raises
+# `NotImplementedError: Cannot copy out of meta tensor; no data!`
+# because the meta tensors weren't actually populated by the state dict
+# load (a known load_state_dict bug with meta-initialized models —
+# warnings show as 'copying from a non-meta parameter ... no-op').
+#
+# Monkey-patch torch.nn.Module.to so that whenever it would crash on a
+# meta tensor, it transparently falls back to `to_empty(device=...)`,
+# which allocates real storage. The subsequent state-dict load then
+# actually populates the params. Idempotent — only triggers on meta.
+# --------------------------------------------------------------------------- #
+_orig_module_to = torch.nn.Module.to
+
+
+def _patched_module_to(self, *args, **kwargs):
+    try:
+        return _orig_module_to(self, *args, **kwargs)
+    except NotImplementedError as e:
+        if "meta tensor" not in str(e):
+            raise
+        # Fall back to to_empty for any module containing meta params.
+        device = kwargs.get("device")
+        if device is None and args:
+            device = args[0]
+        if device is None:
+            raise
+        print(f"[torch-patch] {type(self).__name__}.to() hit meta tensor; "
+              f"falling back to to_empty(device={device}).")
+        return self.to_empty(device=device)
+
+
+torch.nn.Module.to = _patched_module_to
+
+
+# --------------------------------------------------------------------------- #
 # Resolve lerobot at module import time.
 #
 # We need RobotConfig + the SPECIFIC robot subpackage the user selected
