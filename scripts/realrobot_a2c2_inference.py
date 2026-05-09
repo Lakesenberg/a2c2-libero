@@ -394,6 +394,12 @@ class A2C2InferenceConfig:
     no_record: bool = True
     dataset_repo: Optional[str] = None
 
+    # If True, spawn a rerun viewer and stream camera frames + robot
+    # state + executed actions live during the run. Same flag name as
+    # lerobot-record / lerobot-rollout. Requires `pip install rerun-sdk`
+    # (already a lerobot dep).
+    display_data: bool = False
+
     # If provided, the policy's normalization stats are pulled from this
     # dataset (rather than from the ckpt directory or the dataset name
     # baked into the ckpt's config.json). Use this when the 4090 doesn't
@@ -741,6 +747,9 @@ def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
         action_dict = _action_array_to_dict(action_np, motor_order)
         robot.send_action(action_dict)
 
+        # Stream to rerun if --display_data
+        _rr_log_observation(obs_t, action_dict, episode_idx, tick)
+
         if tick_dt > 0:
             sleep_for = tick_dt - (time.perf_counter() - t0)
             if sleep_for > 0:
@@ -768,6 +777,51 @@ def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
 # --------------------------------------------------------------------------- #
 # Main entry point
 # --------------------------------------------------------------------------- #
+_RR = None
+
+
+def _init_rerun(enabled):
+    """Spawn the rerun viewer if --display_data was set. Returns the
+    rerun module on success (so callers can `_rr.log(...)`), or None.
+    """
+    global _RR
+    if not enabled or _RR is not None:
+        return _RR
+    try:
+        import rerun as rr
+    except ImportError:
+        print("[display] rerun-sdk not installed; --display_data ignored. "
+              "Install with: pip install rerun-sdk", file=_sys.stderr)
+        return None
+    rr.init("a2c2_realrobot_inference", spawn=True)
+    _RR = rr
+    return _RR
+
+
+def _rr_log_observation(obs_t, action_dict, episode_idx, tick):
+    """Log one tick's observation + action to rerun."""
+    if _RR is None:
+        return
+    _RR.set_time_sequence("tick", tick)
+    _RR.set_time_sequence("episode", episode_idx)
+    for k, v in obs_t.items():
+        if k.startswith("_"):
+            continue
+        if isinstance(v, torch.Tensor):
+            arr = v.detach().cpu()
+            if arr.dim() == 4 and arr.shape[1] in (1, 3, 4):
+                # BCHW float [0,1] → HWC uint8 for rerun
+                img = (arr[0].permute(1, 2, 0).clamp(0, 1) * 255).to(torch.uint8).numpy()
+                _RR.log(k, _RR.Image(img))
+            elif arr.dim() <= 2:
+                flat = arr.reshape(-1).numpy()
+                for i, x in enumerate(flat):
+                    _RR.log(f"{k}/{i}", _RR.Scalar(float(x)))
+    if action_dict:
+        for k, v in action_dict.items():
+            _RR.log(f"action/{k}", _RR.Scalar(float(v)))
+
+
 def _main(cfg):
     if not cfg.base_policy_path:
         raise SystemExit("--base-policy-path is required")
@@ -776,6 +830,8 @@ def _main(cfg):
             "--robot.* is required (e.g. --robot.type=so100_follower "
             "--robot.port=/dev/ttyACM0)"
         )
+
+    _init_rerun(cfg.display_data)
 
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
