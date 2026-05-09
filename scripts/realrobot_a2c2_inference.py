@@ -511,15 +511,35 @@ def _preprocess_observation(obs, device):
     """Convert raw lerobot robot.get_observation() output to the layout
     SmolVLA / residual_transformer expects.
 
-    Robot returns image tensors as HWC uint8 (OpenCV / direct sensor
-    layout). SmolVLA's prepare_images requires BCHW float in [0, 1].
-    State tensor is 1D, needs a batch dim. Non-tensor entries are
-    forwarded as-is so callers can still attach `task`, etc. Bare
-    camera-name keys (`front`, `hand`) get rewrapped under
-    `observation.images.<name>` to match training-time conventions.
+    Real-robot observations from lerobot 0.5+ have:
+      - Per-motor scalars: `shoulder_pan.pos`, `shoulder_lift.pos`,
+        ..., `gripper.pos`     (each is a Python float or 0-d tensor)
+      - Cameras: `front`, `hand` (HWC uint8 numpy/tensor)
+
+    SmolVLA's prepare_state / prepare_images expect:
+      - `observation.state`             — torch.float32, shape (1, N)
+      - `observation.images.<name>`     — torch.float32, shape (1, 3, H, W) in [0, 1]
+
+    This helper:
+      1. Aggregates every key ending in `.pos` (or `.position`) into a
+         single sorted vector and labels it `observation.state`.
+      2. Converts image HWC uint8 → BCHW float [0, 1] and renames bare
+         camera keys to `observation.images.<name>`.
+      3. Forwards `task` and other non-tensor metadata unchanged.
     """
     out = {}
+    state_parts = {}      # name -> scalar value (for sorted aggregation)
     for k, v in obs.items():
+        # Per-motor position scalars → collect for `observation.state`
+        if k.endswith(".pos") or k.endswith(".position"):
+            if isinstance(v, np.ndarray):
+                v = torch.from_numpy(v)
+            if isinstance(v, torch.Tensor):
+                state_parts[k] = float(v.detach().reshape(-1)[0].cpu().item())
+            else:
+                state_parts[k] = float(v)
+            continue
+
         if not isinstance(v, (np.ndarray, torch.Tensor)):
             out[k] = v
             continue
@@ -551,12 +571,29 @@ def _preprocess_observation(obs, device):
             out[k] = v
             continue
 
-        # State: 1D → (1, N)
-        if "state" in k.lower() and v.dim() == 1:
-            v = v.unsqueeze(0)
+        # Already-aggregated state passthrough (shape correction)
+        if k.endswith("state") or k == "observation.state":
+            if v.dim() == 1:
+                v = v.unsqueeze(0)
+            if v.dtype != torch.float32:
+                v = v.float()
+            out["observation.state"] = v
+            continue
+
+        # Anything else: cast tensors to float, pass through
         if v.dtype != torch.float32 and v.dtype != torch.long:
             v = v.float()
         out[k] = v
+
+    # Build observation.state from collected `.pos` scalars
+    if state_parts and "observation.state" not in out:
+        names = sorted(state_parts.keys())
+        vec = torch.tensor([state_parts[n] for n in names],
+                           dtype=torch.float32, device=device).unsqueeze(0)
+        out["observation.state"] = vec
+        if "_state_keys" not in out:
+            out["_state_keys"] = names      # debug aid; ignored by SmolVLA
+
     return out
 
 
@@ -569,6 +606,18 @@ def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
     inferencer.reset()
     obs = robot.get_observation()
     obs_t = _preprocess_observation(obs, cfg.device)
+
+    if episode_idx == 0:
+        # Print the resolved observation layout once so users can verify
+        # the keys / shapes match what SmolVLA was trained on.
+        print("[obs ] preprocessed layout:")
+        for k, v in obs_t.items():
+            if k == "_state_keys":
+                print(f"  state aggregated from: {v}")
+            elif isinstance(v, torch.Tensor):
+                print(f"  {k}: shape={tuple(v.shape)}, dtype={v.dtype}")
+            else:
+                print(f"  {k}: {type(v).__name__} = {str(v)[:60]}")
 
     tick_dt = cfg.tick_dt_ms / 1000.0
     latencies: list[float] = []
