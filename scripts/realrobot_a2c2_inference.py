@@ -473,7 +473,33 @@ class A2C2Inferencer:
         )
 
         if self._vlm_hidden is not None:
-            entry = self._vlm_hidden[k] if self._vlm_hidden.ndim >= 2 else self._vlm_hidden
+            vh = self._vlm_hidden
+            # SmolVLA may stash vlm_hidden as either:
+            #   - (D,)            single token broadcast across all k
+            #   - (T, D)          per-chunk-step token (T == chunk_size)
+            #   - (1, D) / (1,T,D) batched variants
+            # Resolve to a single (D,) entry for this k.
+            if vh.dim() == 1:
+                entry = vh
+            elif vh.dim() == 2:
+                if vh.shape[0] == 1:                       # (1, D)
+                    entry = vh[0]
+                elif vh.shape[0] >= self.H or vh.shape[0] > k:
+                    entry = vh[k]                          # (T, D)
+                else:
+                    entry = vh[-1]                         # fallback last
+            elif vh.dim() == 3:
+                # (B, T, D) or (1, T, D)
+                t_axis = 1
+                if vh.shape[t_axis] == 1:
+                    entry = vh[0, 0]
+                elif vh.shape[t_axis] > k:
+                    entry = vh[0, k]
+                else:
+                    entry = vh[0, -1]
+            else:
+                entry = vh.reshape(-1, vh.shape[-1])[
+                    min(k, vh.reshape(-1, vh.shape[-1]).shape[0] - 1)]
             observation["vlm_hidden"] = entry.unsqueeze(0).to(self.device)
 
         if self.residual is None:
@@ -580,9 +606,24 @@ def _preprocess_observation(obs, device, motor_order=None):
             v = torch.from_numpy(v)
         v = v.to(device)
 
+        # Detect images by *shape signature* (HWC with 3 channels, or
+        # CHW / BCHW with 3 channels) in addition to key heuristics.
+        # This catches bare camera-name keys like `front` / `hand` /
+        # `wrist` that don't carry "image" in their name.
+        def _looks_like_image(t):
+            if t.dim() == 3:
+                if t.shape[-1] in (1, 3, 4) and t.shape[-1] != t.shape[0]:
+                    return True   # HWC
+                if t.shape[0] in (1, 3, 4):
+                    return True   # CHW
+            if t.dim() == 4 and t.shape[1] in (1, 3, 4):
+                return True       # BCHW
+            return False
+
         is_image = (
             "image" in k.lower()
             or k.startswith("observation.image")
+            or _looks_like_image(v)
         )
         if is_image:
             # HWC → CHW
