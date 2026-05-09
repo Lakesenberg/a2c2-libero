@@ -505,6 +505,62 @@ class A2C2Inferencer:
 
 
 # --------------------------------------------------------------------------- #
+# Observation preprocessing — convert raw robot output to SmolVLA layout
+# --------------------------------------------------------------------------- #
+def _preprocess_observation(obs, device):
+    """Convert raw lerobot robot.get_observation() output to the layout
+    SmolVLA / residual_transformer expects.
+
+    Robot returns image tensors as HWC uint8 (OpenCV / direct sensor
+    layout). SmolVLA's prepare_images requires BCHW float in [0, 1].
+    State tensor is 1D, needs a batch dim. Non-tensor entries are
+    forwarded as-is so callers can still attach `task`, etc. Bare
+    camera-name keys (`front`, `hand`) get rewrapped under
+    `observation.images.<name>` to match training-time conventions.
+    """
+    out = {}
+    for k, v in obs.items():
+        if not isinstance(v, (np.ndarray, torch.Tensor)):
+            out[k] = v
+            continue
+
+        # numpy → torch
+        if isinstance(v, np.ndarray):
+            v = torch.from_numpy(v)
+        v = v.to(device)
+
+        is_image = (
+            "image" in k.lower()
+            or k.startswith("observation.image")
+        )
+        if is_image:
+            # HWC → CHW
+            if v.dim() == 3 and v.shape[-1] in (1, 3, 4):
+                v = v.permute(2, 0, 1).contiguous()
+            # CHW → BCHW
+            if v.dim() == 3:
+                v = v.unsqueeze(0)
+            # uint8 [0,255] → float [0,1]
+            if v.dtype == torch.uint8:
+                v = v.float() / 255.0
+            elif v.dtype != torch.float32:
+                v = v.float()
+            # Rewrap bare camera names under observation.images.<name>
+            if not k.startswith("observation."):
+                k = f"observation.images.{k}"
+            out[k] = v
+            continue
+
+        # State: 1D → (1, N)
+        if "state" in k.lower() and v.dim() == 1:
+            v = v.unsqueeze(0)
+        if v.dtype != torch.float32 and v.dtype != torch.long:
+            v = v.float()
+        out[k] = v
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Episode loop
 # --------------------------------------------------------------------------- #
 def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
@@ -512,8 +568,7 @@ def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
     """Drive one episode end-to-end. Returns metrics dict."""
     inferencer.reset()
     obs = robot.get_observation()
-    obs_t = {k: torch.as_tensor(v).to(cfg.device) for k, v in obs.items()
-             if isinstance(v, (np.ndarray, torch.Tensor))}
+    obs_t = _preprocess_observation(obs, cfg.device)
 
     tick_dt = cfg.tick_dt_ms / 1000.0
     latencies: list[float] = []
@@ -533,8 +588,7 @@ def run_episode(robot, inferencer: A2C2Inferencer, cfg: A2C2InferenceConfig,
 
         # Refresh observation (re-read sensors)
         obs = robot.get_observation()
-        obs_t = {k: torch.as_tensor(v).to(cfg.device) for k, v in obs.items()
-                 if isinstance(v, (np.ndarray, torch.Tensor))}
+        obs_t = _preprocess_observation(obs, cfg.device)
 
     succ_str = input(
         f"[ep {episode_idx + 1}/{cfg.episodes}] success? [y/N] "
